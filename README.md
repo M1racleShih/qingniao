@@ -4,6 +4,8 @@
 
 <h1 align="center">Qingniao</h1>
 
+<p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
+
 <p align="center"><strong>Switch models. Keep your flow.</strong></p>
 <p align="center">A local model gateway and control panel for AI coding agents.<br />Starting with Claude Code. Built with more agents in mind.</p>
 

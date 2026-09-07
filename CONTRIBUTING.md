@@ -16,7 +16,7 @@ Never include API keys, authorization headers, private conversation content, or 
 ## A straightforward pull request
 
 1. Explain the user-visible problem and the behavior your change introduces.
-2. Keep the change focused and use English for code identifiers, comments, documentation, and interface text.
+2. Keep the change focused and use English for code identifiers, comments, primary documentation, and interface text. Translated documentation is welcome; keep the English and Simplified Chinese READMEs aligned when changing their shared content.
 3. Describe what you verified and any remaining limitation. When the runtime is introduced, its build and test instructions must be published with it.
 4. Link the relevant issue if one exists.
 
