@@ -4,6 +4,8 @@ Thanks for helping make model switching less distracting.
 
 Qingniao is at the project-foundation stage. There is no application to build or test yet. Before starting a substantial implementation, open an issue describing the problem, proposed behavior, and how you would verify it. The first release is outlined in the [roadmap](docs/roadmap.md).
 
+The first gateway and `qing` CLI will be implemented in Python. The minimum Python version, libraries, and installation workflow will be established with the first implementation.
+
 ## Useful contributions right now
 
 - Describe a real workflow that breaks when you change models or providers.

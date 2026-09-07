@@ -7,7 +7,7 @@
 <p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
 
 <p align="center"><strong>Switch models. Keep your flow.</strong></p>
-<p align="center">A local model gateway and control panel for AI coding agents.<br />Starting with Claude Code. Built with more agents in mind.</p>
+<p align="center">A local model gateway for AI coding agents, starting in the terminal.<br />Starting with Claude Code. Built with more agents in mind.</p>
 
 <p align="center">
   <a href="#the-experience-were-building">The experience</a> ·
@@ -16,7 +16,7 @@
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-> **Early development.** This repository currently contains the project foundation and brand assets. The gateway, `qing` CLI, and control panel are not implemented yet. The experience below describes the first release we are building.
+> **Early development.** This repository currently contains the project foundation and brand assets. The gateway and `qing` CLI are not implemented yet. The experience below describes the first release we are building.
 
 ## Your next model shouldn't need another config file
 
@@ -28,11 +28,13 @@ Your agent stays where you work. Qingniao keeps the connections in order.
 
 ## The experience we're building
 
-**Connect once.** Add your providers and models, check the connection, and connect Claude Code with a settings preview and a way to restore the original configuration.
+The first release will be operated through `qing` in the terminal. Clear layouts, readable status feedback, and useful errors are part of the [planned terminal experience](docs/terminal-experience.md). A web GUI may follow based on actual usage.
 
-**Switch without the setup ritual.** Choose a configured model in your agent. Qingniao routes it to the right endpoint and credential. Change a route in the control panel and see which requests it will affect.
+**Connect once.** Use `qing` to add your providers and models, check the connection, and connect Claude Code with a settings preview and a way to restore the original configuration.
 
-**See where every request went.** Inspect the requested model, actual upstream model, provider, timing, and reported token usage together. Missing usage stays unknown; estimated costs are labeled as estimates.
+**Switch without the setup ritual.** Choose a configured model in your agent. Qingniao routes it to the right endpoint and credential. Change a route with `qing` and see which requests it will affect. New requests use the updated route without a restart; requests already in progress keep their original destination.
+
+**See where every request went.** Inspect the requested model, actual upstream model, provider, timing, and reported token usage together in the terminal. Missing usage stays unknown; estimated costs are labeled as estimates.
 
 For example, this is the routing experience we want to make visible:
 
