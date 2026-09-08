@@ -34,9 +34,10 @@ workspace is not required for the first release.
 
 ## Status at a glance
 
-Use a short summary and a compact route list. Show requested and actual upstream
-model names separately. Provider configuration alone does not establish that a
-connection is healthy; label checks with their result and time when available.
+Use a short summary and a compact route list labeled with its instance. Show
+requested and actual upstream model names separately. Provider configuration
+alone does not establish that a connection is healthy; label checks with their
+result and time when available.
 
 ```text
 $ qing status
@@ -44,6 +45,7 @@ $ qing status
 qing  /  local gateway                         [DEMO: simulated data]
 
   RUNNING       2 providers configured · 2 routes configured
+  Instance      cc-1
 
   REQUESTED MODEL    PROVIDER    UPSTREAM MODEL
   coding             demo-a      model-a
@@ -59,6 +61,22 @@ At 80 columns, align values without horizontal scrolling. At narrower widths,
 stack labeled fields and wrap long identifiers; preserve complete destinations
 and error messages. Wider terminals can use columns to reduce scanning effort.
 
+## Independent instances and shared configuration
+
+Provider and credential configuration and the available model catalog are shared.
+Each connected Claude Code running instance has its own model selection and
+effective routes, including when two instances work in the same project. A
+project directory or an internal conversation ID is not the isolation boundary.
+
+New instances use the current defaults unless they make an explicit selection.
+Changing defaults does not change existing instances, even those that started
+with defaults. Show defaults separately from each instance's effective routes.
+Bulk switching is outside the first-release scope.
+
+Instance creation, identity transport, lifecycle, and exact command syntax still
+need implementation design and client verification. The behavior below is the
+planned contract, not a working integration.
+
 ## A route change with a clear result
 
 Route updates take effect without restarting the gateway or an already connected
@@ -69,11 +87,15 @@ update takes effect. Saving a file alone is not evidence that a live route chang
 
 Show the affected route, the old and new destinations, the affected client scope,
 and what happens to requests in progress. If the gateway is stopped, distinguish
-saved configuration from a live update. Global, client, and session scope are
-still being designed; the scope label below is illustrative.
+saved configuration from a live update. A switch targets one running instance
+and leaves other instances unchanged. If no unique target can be established,
+ask the user to select one or return an error without changing any route.
+Requests without a valid instance identity must fail clearly rather than use
+another instance or a global default. Model matching remains exact within the
+target instance; unknown models produce errors without fallback.
 
 ```text
-$ qing route set coding --provider demo-b --model model-b
+$ qing route set coding --instance cc-1 --provider demo-b --model model-b
 
 qing  /  route update                          [DEMO: simulated data]
 
@@ -82,7 +104,8 @@ qing  /  route update                          [DEMO: simulated data]
   Requested     coding
   Previous      demo-a / model-a
   Current       demo-b / model-b
-  Scope         Clients using this route
+  Scope         Claude Code instance cc-1 only
+  Other         Instance cc-2 remains on demo-a / model-a
 
   New requests  Use demo-b / model-b
   In progress   1 request continues on demo-a / model-a
@@ -114,6 +137,7 @@ qing  /  latest request                        [DEMO: simulated data]
 
   INTERRUPTED   Upstream connection closed before completion
 
+  Instance      cc-1
   Requested     coding
   Destination   demo-a / model-a
   Input         1,240 tokens
@@ -135,7 +159,14 @@ to find a command's result.
 
 ## Verification before release
 
-These checks are planned; the mockups above do not pass them on their own.
+Status of the implemented development slice (Python, Typer/Rich): narrow
+output, plain output, literal text and route/instance/requests layouts are
+covered by real-PTY tests at 40/80/120 columns plus `NO_COLOR`, `TERM=dumb`
+and redirected streams (`tests/test_terminal.py`); vertical block listings
+keep full IDs, providers, upstream models and revisions complete, user text
+prints literally (never interpreted as markup), unknown usage shows
+`unknown` while real zeros show `0`, and `--json` failures are structured
+JSON on stdout. The remaining rows are still pending for the first release:
 
 | Check | Evidence required |
 | --- | --- |
@@ -144,6 +175,9 @@ These checks are planned; the mockups above do not pass them on their own.
 | Plain output | Exercise `NO_COLOR`, `TERM=dumb`, and redirected streams; no unwanted escape sequences or cursor movement |
 | Complete states | Walk through loading, success, empty, failure, unknown usage, and prompt cancellation |
 | Route feedback | Hold request A open, update its route, and issue B after acknowledgement; A keeps the old destination and B uses the new one |
+| Instance isolation | Run two instances in the same project using the same requested model; switch one and verify the other keeps its destination |
+| Defaults | Change defaults, verify existing instances retain their routes, and start new instances with and without an explicit selection |
+| Target errors | Missing, ambiguous, or invalid instance targets cannot modify routes or fall back to a global switch |
 | Concurrent updates | Each request uses one complete configuration, including its endpoint, model, and credential reference |
 | Real task | A new user completes setup, a request, a route change, inspection, and configuration restoration from the documented terminal flow |
 

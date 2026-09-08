@@ -10,3 +10,6 @@ dist/
 build/
 coverage/
 .qingniao/
+*.py[cod]
+.pytest_cache/
+*.egg-info/

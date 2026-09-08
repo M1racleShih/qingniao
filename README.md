@@ -16,7 +16,7 @@
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-> **Early development.** This repository currently contains the project foundation and brand assets. The gateway and `qing` CLI are not implemented yet. The experience below describes the first release we are building.
+> **Early development — runnable core.** The gateway, the `qing` CLI, per-instance model routing and the Claude Code launcher are implemented and reproducible from this repository with `uv` (see [Try the development slice](#can-i-try-it)). There is no published package, registry release, or clean-install path yet. Real-provider evidence covers exactly the two tested configurations noted below (MiniMax M3 and glm-5.3-flash) — no other provider, endpoint or model has been verified; the first-release items below (configuration preview/backup/restore, published installs) are still being built.
 
 ## Your next model shouldn't need another config file
 
@@ -32,7 +32,7 @@ The first release will be operated through `qing` in the terminal. Clear layouts
 
 **Connect once.** Use `qing` to add your providers and models, check the connection, and connect Claude Code with a settings preview and a way to restore the original configuration.
 
-**Switch without the setup ritual.** Choose a configured model in your agent. Qingniao routes it to the right endpoint and credential. Change a route with `qing` and see which requests it will affect. New requests use the updated route without a restart; requests already in progress keep their original destination.
+**Switch without the setup ritual.** Share provider and credential configuration across your Claude Code instances while choosing models independently in each one. Use `qing` to change a route for a specific instance without changing other instances. After the gateway confirms the update, new requests from that instance use the new route without a restart; requests already in progress keep their original destination. Default changes apply only to new instances.
 
 **See where every request went.** Inspect the requested model, actual upstream model, provider, timing, and reported token usage together in the terminal. Missing usage stays unknown; estimated costs are labeled as estimates.
 
@@ -56,7 +56,21 @@ Qingniao's longer-term role is to offer shared credentials, routing, and request
 
 ## Can I try it?
 
-**Not yet — there is no runnable release or official installation command.** In particular, `npm install -g qing` installs an unrelated package, not Qingniao. Our intended CLI command is `qing`; the distribution package name is still being selected.
+**Yes, as a development slice straight from this repository** — no published release or official installation command exists yet, and `npm install -g qing` installs an unrelated package. The intended CLI command is `qing`; the distribution package name is still being selected.
+
+```
+uv sync --locked --extra dev
+export MY_PROVIDER_TOKEN=...        # credential env your config references; never stored in it
+uv run qing serve &                 # loopback gateway (control token in its state dir)
+uv run qing config apply my-config.json
+uv run qing run --label work        # registers an instance and launches Claude Code
+uv run qing instances               # routes, revisions, per-instance state
+uv run qing requests                # sanitized per-request metadata (usage unknown vs real 0)
+```
+
+Credentials must be exported in the gateway's shell **before** `qing serve`; exporting later in another shell does not affect a running gateway. `qing run` gives every launch (including `--resume`) a fresh instance identity, injects the transport through a temporary 0600 settings file (never in argv), preserves your Claude settings, history and tools, and reports honestly: registered vs. started vs. first gateway-observed request. See [docs/development.md](docs/development.md) and [docs/api.md](docs/api.md).
+
+Real-provider validation (2026-09-08): two concurrent same-directory Claude Code sessions were run through `qing run` against exactly two tested configurations — MiniMax M3 at `https://api.minimaxi.com/anthropic` (model `MiniMax-M3`) and glm-5.3-flash at `https://open.bigmodel.cn/api/anthropic` (model `glm-5.3-flash`), both via `Authorization: Bearer` — covering distinct identities, an in-flight route switch with applied acknowledgement, cross-model tool-result continuation (evidenced by sanitized native tool facts and the reply), a previously inherited default staying unchanged on a live instance across route and defaults updates, defaults that affect only new instances, and explicit model precedence. These two tested configurations do not imply broad provider compatibility, and no real provider was reached through any published install (none exists yet). See `experiments/real-provider-verification/` for the reproducible, sanitized validation script.
 
 Watch this repository for the first runnable release, or help us build it. The [roadmap](docs/roadmap.md) shows the first milestone. If switching providers keeps interrupting your work, open an issue with your agent, provider, and the step that gets in your way. Please leave out credentials and private prompts.
 

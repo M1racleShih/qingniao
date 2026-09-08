@@ -1,0 +1,32 @@
+{
+  "providers": {
+    "dev-fixture": {
+      "base_url": "http://127.0.0.1:9911",
+      "credential_env": "QING_DEV_FIXTURE_TOKEN",
+      "auth": "bearer"
+    },
+    "example-anthropic-compatible": {
+      "base_url": "https://api.example.com",
+      "credential_env": "QING_EXAMPLE_PROVIDER_TOKEN",
+      "auth": "x-api-key"
+    }
+  },
+  "models": {
+    "dev-main": {
+      "provider": "dev-fixture",
+      "upstream_model": "fixture-main-model"
+    },
+    "example-main": {
+      "provider": "example-anthropic-compatible",
+      "upstream_model": "provider/main-model-id"
+    }
+  },
+  "defaults": {
+    "model": "req-main",
+    "aux_model": "req-aux",
+    "routes": {
+      "req-main": "dev-main",
+      "req-aux": "dev-main"
+    }
+  }
+}

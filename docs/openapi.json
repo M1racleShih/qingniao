@@ -1,0 +1,1500 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Qingniao gateway",
+    "version": "0.1.0",
+    "description": "Loopback gateway for Claude Code with a shared connection catalog and per-instance routing. Only the endpoints below are implemented; request bodies are forwarded with only the model field rewritten, and streaming (SSE) responses are relayed chunk by chunk with content encodings decoded."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1",
+      "description": "Loopback only; the port is published in the state directory discovery file (gateway.json, 0600)"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "controlToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Per-run control token from the discovery file. Instance tokens are rejected with 403 instance_token_not_admin."
+      },
+      "instanceToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Per-instance token delivered only in the registration response. Unknown or stale tokens (including after a gateway restart) fail with 401 invalid_instance_token."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_json",
+                  "invalid_request",
+                  "invalid_pagination",
+                  "invalid_config",
+                  "invalid_selection",
+                  "no_default_model",
+                  "unknown_model",
+                  "invalid_admin_token",
+                  "instance_token_not_admin",
+                  "invalid_instance_token",
+                  "instance_ended",
+                  "instance_expired",
+                  "instance_not_found",
+                  "ambiguous_label",
+                  "revision_conflict",
+                  "credential_missing",
+                  "config_persist_failed",
+                  "upstream_error"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "errors_": {
+                "type": "array",
+                "description": "Present on invalid_config: field paths and messages.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "current_revision": {
+                "type": "integer",
+                "description": "Present on revision_conflict."
+              },
+              "request_model": {
+                "type": "string",
+                "description": "Present on unknown_model."
+              },
+              "credential_env": {
+                "type": "string",
+                "description": "Present on credential_missing."
+              }
+            }
+          }
+        }
+      },
+      "Provider": {
+        "type": "object",
+        "required": [
+          "base_url",
+          "credential_env",
+          "auth"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "base_url": {
+            "type": "string",
+            "description": "API root; http/https, no userinfo, query or fragment. /v1/... paths are appended at forwarding time."
+          },
+          "credential_env": {
+            "type": "string",
+            "description": "Name of the environment variable holding the credential in the gateway process. Values are never stored."
+          },
+          "auth": {
+            "type": "string",
+            "enum": [
+              "bearer",
+              "x-api-key"
+            ]
+          }
+        }
+      },
+      "ModelEntry": {
+        "type": "object",
+        "required": [
+          "provider",
+          "upstream_model"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "upstream_model": {
+            "type": "string"
+          }
+        }
+      },
+      "SharedConfig": {
+        "type": "object",
+        "required": [
+          "defaults"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "providers": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Provider"
+            }
+          },
+          "models": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ModelEntry"
+            }
+          },
+          "defaults": {
+            "type": "object",
+            "required": [
+              "model",
+              "aux_model",
+              "routes"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Default main request model; must be a routes key when set."
+              },
+              "aux_model": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Default auxiliary request model; must be a routes key when set."
+              },
+              "routes": {
+                "type": "object",
+                "description": "Exact request model string -> catalog model ID.",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "RouteStatus": {
+        "type": "object",
+        "properties": {
+          "request_model": {
+            "type": "string"
+          },
+          "catalog_model": {
+            "type": "string"
+          },
+          "catalog_present": {
+            "type": "boolean",
+            "description": "False once the catalog entry was edited or deleted after this snapshot was taken."
+          },
+          "provider": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "upstream_model": {
+            "type": "string"
+          },
+          "auth": {
+            "type": "string"
+          },
+          "credential_env": {
+            "type": "string"
+          },
+          "route_revision": {
+            "type": "integer"
+          }
+        }
+      },
+      "InstanceStatus": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "expired",
+              "ended"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "aux_model": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "number"
+          },
+          "lease_expires_in": {
+            "type": "number"
+          },
+          "routes": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/RouteStatus"
+            }
+          }
+        }
+      },
+      "InstanceCreateRequest": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Main request model; null or omitted defaults to defaults.model."
+          },
+          "aux_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Auxiliary request model; null or omitted defaults to defaults.aux_model."
+          },
+          "routes": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Exact request model -> catalog model ID overrides merged over defaults.routes; null or omitted uses defaults.routes.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "Unknown properties are ignored by the runtime."
+      },
+      "RouteSetRequest": {
+        "type": "object",
+        "required": [
+          "request_model",
+          "model",
+          "expected_revision"
+        ],
+        "properties": {
+          "request_model": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string",
+            "description": "Catalog model ID resolved from the current catalog."
+          },
+          "expected_revision": {
+            "type": "integer",
+            "description": "Compare-and-swap guard; must equal the instance's current revision."
+          }
+        },
+        "description": "Unknown properties are ignored by the runtime."
+      },
+      "ProxyMessageRequest": {
+        "type": "object",
+        "required": [
+          "model"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact request model string; matched against the instance's routes, never rewritten client-side."
+          }
+        },
+        "additionalProperties": true,
+        "description": "The gateway performs no Anthropic payload validation beyond requiring a model string; all other fields are forwarded unchanged (with the model field replaced by the snapshot's upstream model). stream may be true (responses are relayed chunk by chunk) or false/absent (buffered relay)."
+      },
+      "UpstreamRelay": {
+        "description": "An upstream response body relayed verbatim: arbitrary structure, schema and content type. The gateway does not interpret, validate or translate upstream payloads. An upstream body may coincidentally match the Error shape; shape alone does not classify a response as gateway-generated."
+      },
+      "RequestRecord": {
+        "type": "object",
+        "description": "Bounded, sanitized request metadata. No request/response bodies, tool arguments, credentials, raw exceptions or upstream error payloads are stored. Usage values are null when unknown; real zeros are preserved.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "request_model": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "upstream_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "route_revision": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "in_progress",
+              "success",
+              "failed",
+              "cancelled",
+              "incomplete"
+            ]
+          },
+          "started_at": {
+            "type": "number"
+          },
+          "finished_at": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "status_code": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "input_tokens": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "output_tokens": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "cache_creation_input_tokens": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "cache_read_input_tokens": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/control/v1/config": {
+      "get": {
+        "summary": "Read the applied shared configuration",
+        "security": [
+          {
+            "controlToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Applied configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "revision": {
+                      "type": "integer"
+                    },
+                    "config": {
+                      "$ref": "#/components/schemas/SharedConfig"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong control token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Instance token used on the control API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Replace the complete shared configuration",
+        "description": "Validates wholly, persists atomically, then swaps catalog and defaults. Invalid input changes nothing. Existing instance snapshots are never modified.",
+        "security": [
+          {
+            "controlToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SharedConfig"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Applied acknowledgement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "applied": {
+                      "type": "boolean"
+                    },
+                    "revision": {
+                      "type": "integer"
+                    },
+                    "config": {
+                      "$ref": "#/components/schemas/SharedConfig"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failure (errors_ lists field paths)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong control token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Instance token used on the control API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/control/v1/instances": {
+      "post": {
+        "summary": "Register a new instance",
+        "description": "Validates all selection input before registering; on success the response contains the instance bearer exactly once.",
+        "security": [
+          {
+            "controlToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstanceCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Instance registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "instance": {
+                      "$ref": "#/components/schemas/InstanceStatus"
+                    },
+                    "token": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid selection or no defaults configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong control token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Instance token used on the control API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "List instances",
+        "security": [
+          {
+            "controlToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 50
+            },
+            "description": "Values above 100 are accepted and clamped to 100."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded instance page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "instances": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/InstanceStatus"
+                      }
+                    },
+                    "offset": {
+                      "type": "integer"
+                    },
+                    "limit": {
+                      "type": "integer"
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "next_offset": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid pagination parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong control token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Instance token used on the control API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/control/v1/instances/{instance_id}": {
+      "parameters": [
+        {
+          "name": "instance_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Instance status",
+        "security": [
+          {
+            "controlToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Instance status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "instance": {
+                      "$ref": "#/components/schemas/InstanceStatus"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown instance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong control token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Instance token used on the control API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "End an instance",
+        "description": "Idempotent. New requests fail closed; already-admitted requests keep their snapshot until completion.",
+        "security": [
+          {
+            "controlToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Instance ended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ended": {
+                      "type": "boolean"
+                    },
+                    "instance": {
+                      "$ref": "#/components/schemas/InstanceStatus"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown instance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong control token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Instance token used on the control API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/control/v1/instances/{instance_id}/renew": {
+      "parameters": [
+        {
+          "name": "instance_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "summary": "Renew an instance lease",
+        "description": "Extends the lease (default 30 s). Rejected for ended or already-expired instances.",
+        "security": [
+          {
+            "controlToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lease renewed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "instance": {
+                      "$ref": "#/components/schemas/InstanceStatus"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Instance ended or lease expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown instance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong control token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/control/v1/instances/{instance_id}/routes": {
+      "parameters": [
+        {
+          "name": "instance_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Switch one request model for one instance",
+        "description": "Resolves the destination from the current catalog and atomically replaces that route snapshot; the acknowledgement is returned only after the gateway applied the change. Requests already admitted keep the previous snapshot.",
+        "security": [
+          {
+            "controlToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RouteSetRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Applied acknowledgement with the new revision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "applied": {
+                      "type": "boolean"
+                    },
+                    "revision": {
+                      "type": "integer"
+                    },
+                    "route": {
+                      "type": "object",
+                      "properties": {
+                        "request_model": {
+                          "type": "string"
+                        },
+                        "catalog_model": {
+                          "type": "string"
+                        },
+                        "provider": {
+                          "type": "string"
+                        },
+                        "upstream_model": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "instance": {
+                      "$ref": "#/components/schemas/InstanceStatus"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body or unknown destination",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision conflict (current_revision included)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Instance ended or lease expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown instance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong control token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/messages": {
+      "post": {
+        "summary": "Forward an Anthropic messages request (non-streaming)",
+        "description": "Forward an Anthropic messages request. Authenticates the instance, matches the body model exactly against the instance's routes, captures the immutable route snapshot at admission, then forwards with only the model field rewritten and the provider credential injected. The client's own Authorization/x-api-key are never forwarded. Query strings (e.g. ?beta=true) are preserved. Non-streaming bodies are relayed buffered; stream:true responses are relayed chunk by chunk with content encodings (e.g. gzip) decoded by the gateway, so downstream always receives identity-encoded SSE with intact event and usage semantics. No retries, no redirects, no model fallback.",
+        "security": [
+          {
+            "instanceToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProxyMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Upstream response relayed verbatim (status and body)"
+          },
+          "default": {
+            "description": "Any upstream status code and body relayed verbatim. The gateway does not interpret or translate upstream error payloads.",
+            "content": {
+              "application/json": {},
+              "text/event-stream": {},
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Either a gateway-generated error (invalid_json / invalid_request / unknown_model; Error schema with a stable code) or an upstream 400 response relayed verbatim (arbitrary body, schema and content type, no stable code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UpstreamRelay"
+                    }
+                  ]
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              },
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Either a gateway-generated error (invalid_instance_token; Error schema with a stable code) or an upstream 401 response relayed verbatim (arbitrary body, schema and content type, no stable code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UpstreamRelay"
+                    }
+                  ]
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              },
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Either a gateway-generated error (instance_ended / instance_expired; Error schema with a stable code) or an upstream 403 response relayed verbatim (arbitrary body, schema and content type, no stable code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UpstreamRelay"
+                    }
+                  ]
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              },
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Either a gateway-generated error (credential_missing; Error schema with a stable code) or an upstream 500 response relayed verbatim (arbitrary body, schema and content type, no stable code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UpstreamRelay"
+                    }
+                  ]
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              },
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Either a gateway-generated error (upstream_error; Error schema with a stable code) or an upstream 502 response relayed verbatim (arbitrary body, schema and content type, no stable code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UpstreamRelay"
+                    }
+                  ]
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              },
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/messages/count_tokens": {
+      "post": {
+        "summary": "Forward a count_tokens request",
+        "description": "Same authentication, routing and forwarding rules as /v1/messages, applied to the upstream /v1/messages/count_tokens path.",
+        "security": [
+          {
+            "instanceToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProxyMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Upstream response relayed verbatim"
+          },
+          "default": {
+            "description": "Any upstream status code and body relayed verbatim.",
+            "content": {
+              "application/json": {},
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Either a gateway-generated error (invalid_json / invalid_request / unknown_model; Error schema with a stable code) or an upstream 400 response relayed verbatim (arbitrary body, schema and content type, no stable code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UpstreamRelay"
+                    }
+                  ]
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              },
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Either a gateway-generated error (invalid_instance_token; Error schema with a stable code) or an upstream 401 response relayed verbatim (arbitrary body, schema and content type, no stable code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UpstreamRelay"
+                    }
+                  ]
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              },
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Either a gateway-generated error (instance_ended / instance_expired; Error schema with a stable code) or an upstream 403 response relayed verbatim (arbitrary body, schema and content type, no stable code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UpstreamRelay"
+                    }
+                  ]
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              },
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Either a gateway-generated error (credential_missing; Error schema with a stable code) or an upstream 500 response relayed verbatim (arbitrary body, schema and content type, no stable code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UpstreamRelay"
+                    }
+                  ]
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              },
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Either a gateway-generated error (upstream_error; Error schema with a stable code) or an upstream 502 response relayed verbatim (arbitrary body, schema and content type, no stable code).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UpstreamRelay"
+                    }
+                  ]
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              },
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamRelay"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/control/v1/requests": {
+      "get": {
+        "summary": "List bounded request metadata",
+        "security": [
+          {
+            "controlToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 50
+            },
+            "description": "Values above 100 are accepted and clamped to 100."
+          },
+          {
+            "name": "instance_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional exact instance ID filter."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded request metadata page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "requests": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/RequestRecord"
+                      }
+                    },
+                    "offset": {
+                      "type": "integer"
+                    },
+                    "limit": {
+                      "type": "integer"
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "next_offset": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid pagination parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong control token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Instance token used on the control API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
