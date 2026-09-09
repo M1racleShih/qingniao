@@ -23,9 +23,9 @@ from pathlib import Path
 
 from . import errors, state as state_mod
 from .config import ConfigStore, atomic_write_json
-from .credentials import CredentialStore
+from .credentials import CREDENTIALS_DIR_NAME, CredentialStore
 from .importing import ImportPlan, plan_preview, verify_source_unchanged
-from .tokens import OPERATION_ID_RE
+from .tokens import CREDENTIAL_ID_RE, OPERATION_ID_RE
 
 TRANSACTIONS_DIR_NAME = "transactions"
 _OPERATION_FILE_RE = re.compile(r"\A(op_[0-9a-f]{32})\.json\Z")
@@ -107,10 +107,16 @@ def recover_open_transactions(state_dir: Path) -> list[dict]:
     (missing credentials refuse to proceed instead of guessing); any
     other state means the commit never happened and this operation's
     staged credential and upgrade backup are removed.
+
+    Credential files referenced by the active configuration or created
+    by committed records are durable versions and kept (rotation never
+    deletes old versions); files no record ever committed are staging
+    orphans of interrupted transactions and are removed.
     """
-    store = ConfigStore(Path(state_dir) / state_mod.CONFIG_NAME)
-    creds = CredentialStore(Path(state_dir))
-    txs = TransactionStore(Path(state_dir))
+    state_dir = Path(state_dir)
+    store = ConfigStore(state_dir / state_mod.CONFIG_NAME)
+    creds = CredentialStore(state_dir)
+    txs = TransactionStore(state_dir)
     outcomes: list[dict] = []
     for op_id, record in txs.open_records():
         if record is None:
@@ -150,7 +156,7 @@ def recover_open_transactions(state_dir: Path) -> list[dict]:
             backup_name = record.get("backup_path")
             if isinstance(backup_name, str) and backup_name == ConfigStore.BACKUP_NAME:
                 try:
-                    (Path(state_dir) / backup_name).unlink()
+                    (state_dir / backup_name).unlink()
                 except OSError:
                     pass
             conclusion = {
@@ -159,7 +165,37 @@ def recover_open_transactions(state_dir: Path) -> list[dict]:
             }
         txs.conclude(op_id, conclusion)
         outcomes.append({"operation_id": op_id, "status": conclusion["status"]})
+    _remove_orphan_credentials(state_dir, store, txs)
     return outcomes
+
+
+def _remove_orphan_credentials(state_dir: Path, store: ConfigStore, txs: TransactionStore) -> None:
+    credentials_dir = state_dir / CREDENTIALS_DIR_NAME
+    if not credentials_dir.is_dir():
+        return
+    try:
+        current = store.load()
+        keep = {
+            provider.credential_id
+            for provider in current.providers.values()
+            if provider.credential_id is not None
+        }
+    except errors.ApiError:
+        keep = set()
+    for _op_id, record in txs.records():
+        if isinstance(record, dict):
+            conclusion = record.get("conclusion")
+            if isinstance(conclusion, dict) and conclusion.get("status") == "committed":
+                created = record.get("created_credential_id")
+                if isinstance(created, str):
+                    keep.add(created)
+    creds = CredentialStore(state_dir)
+    for entry in credentials_dir.iterdir():
+        name = entry.name
+        if not CREDENTIAL_ID_RE.match(name):
+            continue  # never touch files qingniao did not create
+        if name not in keep:
+            creds.delete(name)
 
 
 def query_operation(state_dir: Path, operation_id: object) -> dict | None:
@@ -240,7 +276,14 @@ def _commit_import(*, state_dir: Path, plan: ImportPlan, raw_source: bytes | Non
             credential_id = creds.create(plan.secret)
             record["created_credential_id"] = credential_id
             txs.open(record)
-        upgraded = store.backup_legacy_now()
+        try:
+            upgraded = store.backup_legacy_now()
+        except OSError as exc:
+            raise errors.ApiError(
+                500,
+                errors.CONFIG_PERSIST_FAILED,
+                "cannot back up the legacy configuration before the first versioned write",
+            ) from exc
         if upgraded is not None and upgraded[1]:
             record["backup_path"] = upgraded[0]
             txs.open(record)
