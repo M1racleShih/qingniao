@@ -362,8 +362,13 @@ def atomic_write_json(path: Path, payload: dict, mode: int = 0o600) -> None:
 class ConfigStore:
     """Loads and atomically persists the shared configuration."""
 
+    BACKUP_NAME = "config.backup.pre-v1.json"
+
     def __init__(self, path: Path):
         self.path = path
+        # Backup filename when the most recent apply upgraded a legacy file;
+        # None otherwise. Read right after apply under the same lock.
+        self.last_upgrade: str | None = None
 
     def load(self) -> SharedConfig:
         if not self.path.exists():
@@ -399,21 +404,90 @@ class ConfigStore:
             return 0
         return generation
 
-    def apply(self, data: object) -> SharedConfig:
+    def _legacy_bytes_on_disk(self) -> bytes | None:
+        if not self.path.exists():
+            return None
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if isinstance(data, dict) and "schema_version" not in data:
+            return self.path.read_bytes()
+        return None
+
+    def backup_legacy_now(self) -> tuple[str, bool] | None:
+        """Snapshot a legacy file before the first versioned write.
+
+        Returns (backup filename, created-by-this-call) or None when the
+        on-disk file is already versioned or absent. A pre-existing backup
+        is never overwritten.
+        """
+        legacy = self._legacy_bytes_on_disk()
+        if legacy is None:
+            return None
+        backup = self.path.parent / self.BACKUP_NAME
+        if backup.exists():
+            return (self.BACKUP_NAME, False)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(self.path.parent), prefix=f".{self.BACKUP_NAME}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(legacy)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(tmp_name, 0o600)
+            os.replace(tmp_name, backup)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+        return (self.BACKUP_NAME, True)
+
+    def apply(
+        self,
+        data: object,
+        *,
+        expected_generation: int | None = None,
+        operation_id: str | None = None,
+    ) -> SharedConfig:
         try:
             config = validate_config(data)
         except ConfigValidationError as exc:
             raise exc.to_api_error() from exc
+        if expected_generation is not None and (
+            isinstance(expected_generation, bool) or not isinstance(expected_generation, int)
+        ):
+            raise errors.ApiError(400, errors.INVALID_REQUEST, "expected_generation must be an integer")
+        if operation_id is not None and not OPERATION_ID_RE.match(operation_id):
+            raise errors.ApiError(400, errors.INVALID_REQUEST, "operation_id must be of the form op_<hex>")
+        persisted = self.persisted_generation()
+        if expected_generation is not None and expected_generation != persisted:
+            raise errors.ApiError(
+                409,
+                errors.GENERATION_CONFLICT,
+                "the configuration changed concurrently; re-read it and retry",
+                current_generation=persisted,
+            )
+        self.last_upgrade = None
         # Generation strictly increases with every persisted write, starting
         # at 1 when a legacy or absent configuration is first upgraded.
-        config = dataclasses.replace(config, generation=self.persisted_generation() + 1)
+        config = dataclasses.replace(config, generation=persisted + 1)
+        if operation_id is not None:
+            config = dataclasses.replace(config, last_operation=operation_id)
         try:
+            upgraded = self.backup_legacy_now()
+            if upgraded is not None:
+                self.last_upgrade = upgraded[0]
             atomic_write_json(self.path, config.to_json())
         except OSError as exc:
             # Persistence failed before os.replace took effect, so the prior
             # on-disk configuration is intact; the in-memory catalog, config
             # revision and instances are only swapped after a successful
             # write and therefore remain unchanged here.
+            self.last_upgrade = None
             raise errors.ApiError(
                 500,
                 errors.CONFIG_PERSIST_FAILED,

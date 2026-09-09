@@ -22,11 +22,22 @@ def _fail(message: str) -> int:
 
 
 def run_serve(state_dir: Path, port: int) -> int:
+    from . import transactions
+
     state.prepare_state_dir(state_dir)
     lock = state.GatewayLock(state_dir)
     try:
         lock.acquire()
     except errors.ApiError as exc:
+        return _fail(exc.message)
+
+    # Recovery runs before the gateway accepts anything: open or
+    # unconfirmed import transactions are resolved (or startup refuses)
+    # while this process alone owns the state directory.
+    try:
+        transactions.recover_open_transactions(state_dir)
+    except errors.ApiError as exc:
+        lock.release()
         return _fail(exc.message)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
