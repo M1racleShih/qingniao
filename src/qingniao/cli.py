@@ -22,7 +22,7 @@ try:  # newer Typer vendors its own click; older Typer uses the standalone packa
 except ImportError:  # pragma: no cover
     import click.exceptions as _click_exceptions
 
-from . import state as state_mod
+from . import errors, state as state_mod
 from .serve import run_serve
 
 app = typer.Typer(add_completion=False, help="Qingniao gateway control")
@@ -175,9 +175,15 @@ def config_show(
             return
         config = payload.get("config", {})
         stdout.print(f"config revision: {payload.get('revision')}")
+        if isinstance(payload.get("generation"), int):
+            stdout.print(f"generation: {payload.get('generation')}")
         stdout.print("providers:")
         for pid, p in config.get("providers", {}).items():
-            stdout.print(f"  {pid}: {p.get('base_url')} ({p.get('auth')}, credential env {p.get('credential_env')})")
+            if p.get("credential_env") is not None:
+                credential = f"credential env {p.get('credential_env')}"
+            else:
+                credential = f"private credential {p.get('credential_id')}"
+            stdout.print(f"  {pid}: {p.get('base_url')} ({p.get('auth')}, {credential})", markup=False)
         stdout.print("models:")
         for mid, m in config.get("models", {}).items():
             stdout.print(f"  {mid}: provider {m.get('provider')}, upstream model {m.get('upstream_model')}")
@@ -211,6 +217,197 @@ def config_apply(
             return
         stdout.print(f"config applied (revision {payload.get('revision')})")
         stdout.print("catalog and defaults replaced; existing instances keep their snapshots")
+
+
+_AUTH_CHOICES = ("bearer", "x-api-key")
+_PRIMARY_CHOICES = {
+    "settings": "settings.model",
+    "env": "env.ANTHROPIC_MODEL",
+    "settings.model": "settings.model",
+    "env.ANTHROPIC_MODEL": "env.ANTHROPIC_MODEL",
+}
+_CONFLICT_CHOICES = ("fail", "skip", "update", "new")
+
+
+def _print_import_preview(preview: dict) -> None:
+    stdout.print(f"source: {preview['source']}", markup=False)
+    stdout.print(f"status: {preview['status']}", markup=False)
+    provider = preview.get("provider")
+    if provider is not None:
+        stdout.print(f"provider {provider['id']}:", markup=False)
+        stdout.print(f"  base url: {provider['base_url']}", markup=False)
+        stdout.print(f"  auth: {provider['auth']}", markup=False)
+        stdout.print(f"  credential: {provider['credential']}", markup=False)
+    if preview["models"]:
+        stdout.print("models:")
+        for model in preview["models"]:
+            keys = ", ".join(model["request_keys"]) or "(no request keys)"
+            stdout.print(
+                f"  {model['id']} -> upstream {model['upstream_model']} (requests: {keys})",
+                markup=False,
+            )
+    defaults = preview.get("defaults")
+    if defaults is not None:
+        stdout.print("defaults:")
+        stdout.print(f"  model: {defaults['model']}", markup=False)
+        stdout.print(f"  aux model: {defaults['aux_model']}", markup=False)
+        for key, dest in defaults["routes"].items():
+            stdout.print(f"  route {key} -> {dest}", markup=False)
+    for note in preview["incomplete"]:
+        stdout.print(f"incomplete: {note}", markup=False)
+    for note in preview["unsupported_auth"]:
+        stdout.print(f"unsupported auth: {note}", markup=False)
+    for name in preview["ignored"]:
+        stdout.print(f"ignored: {name} (not migrated)", markup=False)
+    for note in preview["notes"]:
+        stdout.print(f"note: {note}", markup=False)
+    stdout.print(
+        "existing instances keep their snapshots; only new instances use new defaults",
+        markup=False,
+    )
+
+
+@config_app.command("import-claude")
+def config_import_claude(
+    source: Optional[Path] = typer.Option(
+        None, "--source", help="Claude settings file (default: CLAUDE_CONFIG_DIR or HOME settings)"
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="apply the plan; without it the command only previews and writes nothing"
+    ),
+    auth: Optional[str] = typer.Option(
+        None, "--auth", help="credential to import when the source has both: bearer | x-api-key"
+    ),
+    primary_model: Optional[str] = typer.Option(
+        None, "--primary-model", help="primary model source when both differ: settings | env"
+    ),
+    aux_same_as_primary: bool = typer.Option(
+        False, "--aux-same-as-primary", help="explicitly use the primary model as the aux model"
+    ),
+    conflict: str = typer.Option(
+        "fail", "--conflict", help="same-name conflict handling: fail | skip | update | new"
+    ),
+    new_provider_id: Optional[str] = typer.Option(
+        None, "--new-provider-id", help="provider id for --conflict new"
+    ),
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """Import a Claude settings file into the shared configuration.
+
+    Preview by default: nothing is written and no provider is contacted.
+    Applying stores the credential in the private store and commits one
+    configuration transaction; saved or applied never means verified.
+    """
+    from . import claude_source, transactions
+    from .config import ConfigStore
+    from .importing import (
+        ImportDecisions,
+        PlanError,
+        build_plan,
+        plan_preview,
+        source_digest,
+    )
+    from .tokens import new_operation_id
+
+    with structured_cli_errors(json_output):
+        if auth is not None and auth not in _AUTH_CHOICES:
+            raise typer.BadParameter(f"--auth must be one of: {', '.join(_AUTH_CHOICES)}")
+        if primary_model is not None and primary_model not in _PRIMARY_CHOICES:
+            raise typer.BadParameter("--primary-model must be one of: settings, env")
+        if conflict not in _CONFLICT_CHOICES:
+            raise typer.BadParameter(f"--conflict must be one of: {', '.join(_CONFLICT_CHOICES)}")
+
+        directory = _state_dir(state_dir)
+        path = claude_source.resolve_source(source)
+        try:
+            raw = claude_source.read_source(path)
+            parsed = claude_source.parse_claude_settings(raw, source=path)
+        except claude_source.SourceError as exc:
+            raise CliError(exc.code, exc.message) from exc
+        discovery = state_mod.read_discovery(directory)
+        gateway_endpoint = f"http://127.0.0.1:{discovery['port']}" if discovery else None
+        store = ConfigStore(directory / state_mod.CONFIG_NAME)
+        try:
+            current = store.load()
+        except errors.ApiError as exc:
+            raise CliError(exc.code, exc.message) from exc
+        decisions = ImportDecisions(
+            auth_kind=auth,
+            primary_source=_PRIMARY_CHOICES.get(primary_model) if primary_model else None,
+            aux_same_as_primary=aux_same_as_primary,
+            conflict=conflict,
+            new_provider_id=new_provider_id,
+        )
+        try:
+            plan = build_plan(
+                parsed,
+                source_digest=source_digest(raw),
+                current=current,
+                credential_store=transactions.CredentialStore(directory),
+                decisions=decisions,
+                operation_id=new_operation_id(),
+                gateway_endpoint=gateway_endpoint,
+            )
+        except PlanError as exc:
+            raise CliError(exc.code, exc.message) from exc
+        preview = plan_preview(plan)
+        if not apply:
+            preview["written"] = False
+            if json_output:
+                _print_json(preview)
+                return
+            _print_import_preview(preview)
+            stdout.print("preview only: nothing was written, no provider was contacted", markup=False)
+            return
+
+        if sys.stdin.isatty():
+            confirmed = typer.confirm("Apply this import plan?")
+            if not confirmed:
+                if json_output:
+                    _print_json({"status": "cancelled", "written": False})
+                else:
+                    stdout.print("cancelled: nothing was written", markup=False)
+                return
+
+        try:
+            result = transactions.commit_import_offline(
+                state_dir=directory, plan=plan, raw_source=raw
+            )
+        except errors.ApiError as exc:
+            if exc.code == errors.GATEWAY_LOCKED:
+                raise CliError(
+                    "gateway_running",
+                    "the gateway is running with this state directory; stop it before "
+                    "importing offline",
+                ) from exc
+            raise CliError(exc.code, exc.message) from exc
+        payload = {"result": result, "preview": preview}
+        if json_output:
+            _print_json(payload)
+            return
+        status = result["status"]
+        if status == "unchanged":
+            stdout.print("no changes: the same connection is already present", markup=False)
+        elif status == "skipped":
+            stdout.print("skipped: no changes were made", markup=False)
+        else:
+            stdout.print(
+                f"import committed (generation {result.get('generation')})",
+                markup=False,
+            )
+            stdout.print(
+                f"provider {result.get('provider_id')} saved with a private credential",
+                markup=False,
+            )
+            stdout.print(
+                "configuration saved; start or restart the gateway to use it",
+                markup=False,
+            )
+        stdout.print(
+            "connection not verified: importing never contacts the provider",
+            markup=False,
+        )
 
 
 def _parse_route_pair(pair: str) -> tuple[str, str]:

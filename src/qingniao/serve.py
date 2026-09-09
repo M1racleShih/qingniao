@@ -12,6 +12,7 @@ import uvicorn
 from . import errors, state
 from .app import build_app
 from .config import ConfigStore
+from .credentials import CredentialStore
 from .gateway import Gateway
 from .tokens import new_control_token, token_hash
 
@@ -59,7 +60,7 @@ def run_serve(state_dir: Path, port: int) -> int:
         return _fail(exc.message)
 
     control_token = new_control_token()
-    gateway = Gateway(config, store)
+    gateway = Gateway(config, store, credential_store=CredentialStore(state_dir))
     pid = os.getpid()
 
     async def _startup() -> None:

@@ -16,11 +16,24 @@ from typing import Callable, Mapping
 
 from . import errors
 from .config import SharedConfig, ConfigStore
+from .credentials import CredentialStore
 from .sse import USAGE_KEYS
 from .tokens import new_bearer_token, new_instance_id, token_hash
 
 DEFAULT_LEASE_SECONDS = 30.0
 MAX_RECORDS = 1000
+
+
+@dataclass(frozen=True)
+class CredentialRef:
+    """Typed credential reference: an environment variable or a private id."""
+
+    kind: str  # "env" | "private"
+    name: str
+
+    @property
+    def is_private(self) -> bool:
+        return self.kind == "private"
 
 
 @dataclass(frozen=True)
@@ -31,7 +44,7 @@ class RouteSnapshot:
     catalog_model: str
     provider_id: str
     base_url: str
-    credential_env: str
+    credential: CredentialRef
     auth: str
     upstream_model: str
     route_revision: int
@@ -116,12 +129,14 @@ class Gateway:
         config: SharedConfig,
         config_store: ConfigStore | None = None,
         *,
+        credential_store: CredentialStore | None = None,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
         lease_seconds: float = DEFAULT_LEASE_SECONDS,
     ):
         self.config = config
         self.config_store = config_store
+        self.credential_store = credential_store
         self.config_revision = 1
         self.clock = clock
         self.wall_clock = wall_clock
@@ -150,12 +165,16 @@ class Gateway:
                 f"unknown destination {catalog_model!r}",
             )
         provider = self.config.providers[entry.provider]
+        if provider.credential_id is not None:
+            credential = CredentialRef(kind="private", name=provider.credential_id)
+        else:
+            credential = CredentialRef(kind="env", name=provider.credential_env or "")
         return RouteSnapshot(
             request_model=request_model,
             catalog_model=catalog_model,
             provider_id=entry.provider,
             base_url=provider.base_url,
-            credential_env=provider.credential_env,
+            credential=credential,
             auth=provider.auth,
             upstream_model=entry.upstream_model,
             route_revision=route_revision,
@@ -253,23 +272,32 @@ class Gateway:
             "created_at": instance.created_wall,
             "lease_expires_in": round(instance.lease_expires_mono - self.clock(), 3),
             "routes": {
-                request_model: {
-                    "request_model": request_model,
-                    "catalog_model": snap.catalog_model,
-                    "catalog_present": (
-                        snap.catalog_model in self.config.models
-                        and self._snapshot_matches_catalog(snap)
-                    ),
-                    "provider": snap.provider_id,
-                    "base_url": snap.base_url,
-                    "upstream_model": snap.upstream_model,
-                    "auth": snap.auth,
-                    "credential_env": snap.credential_env,
-                    "route_revision": snap.route_revision,
-                }
+                request_model: self._route_status(request_model, snap)
                 for request_model, snap in instance.routes.items()
             },
         }
+
+    def _route_status(self, request_model: str, snap: RouteSnapshot) -> dict:
+        status: dict = {
+            "request_model": request_model,
+            "catalog_model": snap.catalog_model,
+            "catalog_present": (
+                snap.catalog_model in self.config.models
+                and self._snapshot_matches_catalog(snap)
+            ),
+            "provider": snap.provider_id,
+            "base_url": snap.base_url,
+            "upstream_model": snap.upstream_model,
+            "auth": snap.auth,
+            "route_revision": snap.route_revision,
+        }
+        # Environment variable names are not secret and keep their existing
+        # key; private references show the kind and id only.
+        if snap.credential.is_private:
+            status["credential_id"] = snap.credential.name
+        else:
+            status["credential_env"] = snap.credential.name
+        return status
 
     def _snapshot_matches_catalog(self, snap: RouteSnapshot) -> bool:
         entry = self.config.models.get(snap.catalog_model)
@@ -278,10 +306,14 @@ class Gateway:
         provider = self.config.providers.get(entry.provider)
         if provider is None:
             return False
+        if provider.credential_id is not None:
+            credential = CredentialRef(kind="private", name=provider.credential_id)
+        else:
+            credential = CredentialRef(kind="env", name=provider.credential_env or "")
         return (
             snap.provider_id == entry.provider
             and snap.base_url == provider.base_url
-            and snap.credential_env == provider.credential_env
+            and snap.credential == credential
             and snap.auth == provider.auth
             and snap.upstream_model == entry.upstream_model
         )
@@ -387,13 +419,28 @@ class Gateway:
         return snapshot
 
     def credential(self, snapshot: RouteSnapshot) -> str:
-        value = os.environ.get(snapshot.credential_env, "")
+        """Resolve the snapshot's credential just before the request is sent.
+
+        Environment references read the gateway process environment; private
+        references read the immutable credential file through the checked
+        store. Failures are sanitized and never fall back to another source.
+        """
+        if snapshot.credential.is_private:
+            if self.credential_store is None:
+                raise errors.ApiError(
+                    500,
+                    errors.CREDENTIAL_UNREADABLE,
+                    "private credential storage is not attached to this gateway process",
+                    credential_id=snapshot.credential.name,
+                )
+            return self.credential_store.read(snapshot.credential.name)
+        value = os.environ.get(snapshot.credential.name, "")
         if not value:
             raise errors.ApiError(
                 500,
                 errors.CREDENTIAL_MISSING,
-                f"environment variable {snapshot.credential_env} is not set in the gateway process",
-                credential_env=snapshot.credential_env,
+                f"environment variable {snapshot.credential.name} is not set in the gateway process",
+                credential_env=snapshot.credential.name,
             )
         return value
 
