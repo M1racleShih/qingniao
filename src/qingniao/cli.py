@@ -370,44 +370,34 @@ def config_import_claude(
                     stdout.print("cancelled: nothing was written", markup=False)
                 return
 
+        online = False
         try:
             result = transactions.commit_import_offline(
                 state_dir=directory, plan=plan, raw_source=raw
             )
         except errors.ApiError as exc:
-            if exc.code == errors.GATEWAY_LOCKED:
+            if exc.code != errors.GATEWAY_LOCKED:
+                raise CliError(exc.code, exc.message) from exc
+            if discovery is None:
                 raise CliError(
-                    "gateway_running",
-                    "the gateway is running with this state directory; stop it before "
-                    "importing offline",
+                    "gateway_unreachable",
+                    "the state directory is locked but no gateway discovery is available; "
+                    "nothing was written",
                 ) from exc
-            raise CliError(exc.code, exc.message) from exc
-        payload = {"result": result, "preview": preview}
+            # A gateway owns the directory: submit the plan to it instead of
+            # ever writing under a running gateway.
+            from .importing import verify_source_unchanged
+
+            try:
+                verify_source_unchanged(plan.source_digest, claude_source.read_source(path))
+            except Exception as exc2:
+                raise CliError("source_changed", str(exc2)) from exc2
+            result = _submit_import_online(directory, plan)
+            online = True
         if json_output:
-            _print_json(payload)
+            _print_json({"result": result, "preview": preview})
             return
-        status = result["status"]
-        if status == "unchanged":
-            stdout.print("no changes: the same connection is already present", markup=False)
-        elif status == "skipped":
-            stdout.print("skipped: no changes were made", markup=False)
-        else:
-            stdout.print(
-                f"import committed (generation {result.get('generation')})",
-                markup=False,
-            )
-            stdout.print(
-                f"provider {result.get('provider_id')} saved with a private credential",
-                markup=False,
-            )
-            stdout.print(
-                "configuration saved; start or restart the gateway to use it",
-                markup=False,
-            )
-        stdout.print(
-            "connection not verified: importing never contacts the provider",
-            markup=False,
-        )
+        _print_import_result(result, online=online)
 
 
 def _parse_route_pair(pair: str) -> tuple[str, str]:
@@ -418,6 +408,107 @@ def _parse_route_pair(pair: str) -> tuple[str, str]:
     if not left or not right:
         raise typer.BadParameter(f"route must be REQUEST=DEST, got {pair!r}")
     return left, right
+
+
+def _submit_import_online(state_dir: Path, plan) -> dict:
+    """Submit a plan to the running gateway; never fall back to offline writes.
+
+    A timeout leaves the effect unconfirmed: the operation is queried once
+    by id, and an unresolved outcome is reported as unconfirmed instead of
+    being retried blindly or claimed as failed.
+    """
+    from .importing import plan_to_wire
+
+    try:
+        response = _call(
+            state_dir,
+            "POST",
+            "/control/v1/imports",
+            json={"operation_id": plan.operation_id, "plan": plan_to_wire(plan)},
+            timeout=30.0,
+            unconfirmed_action="the import submit",
+        )
+    except CliError as exc:
+        if exc.code == "unconfirmed":
+            try:
+                query = _check(
+                    _call(state_dir, "GET", f"/control/v1/operations/{plan.operation_id}")
+                )
+            except (CliError, typer.BadParameter):
+                query = {}
+            status = query.get("status")
+            if status in ("committed", "aborted"):
+                return {
+                    "status": status,
+                    "operation_id": plan.operation_id,
+                    "generation": query.get("generation"),
+                    "applied": status == "committed",
+                    "recovered": True,
+                }
+            return {
+                "status": "unconfirmed",
+                "operation_id": plan.operation_id,
+                "message": "the gateway did not confirm the import in time; check again "
+                f"with 'qing config operation {plan.operation_id}' before retrying",
+            }
+        raise
+    return _check(response)
+
+
+def _print_import_result(result: dict, *, online: bool) -> None:
+    status = result.get("status")
+    if status == "unchanged":
+        stdout.print("no changes: the same connection is already present", markup=False)
+    elif status == "skipped":
+        stdout.print("skipped: no changes were made", markup=False)
+    elif status == "aborted":
+        stdout.print(
+            f"import aborted by recovery (operation {result.get('operation_id')}); "
+            "nothing was left behind",
+            markup=False,
+        )
+    elif status == "unconfirmed":
+        stdout.print(
+            f"import unconfirmed (operation {result.get('operation_id')}); "
+            "do not assume it failed — query it again before retrying",
+            markup=False,
+        )
+    else:
+        stdout.print(
+            f"import committed (generation {result.get('generation')})",
+            markup=False,
+        )
+        if result.get("duplicate"):
+            stdout.print("this repeats an operation that already completed", markup=False)
+        stdout.print(
+            f"provider {result.get('provider_id')} saved with a private credential",
+            markup=False,
+        )
+        if online:
+            stdout.print("applied by the running gateway", markup=False)
+        else:
+            stdout.print("configuration saved; start or restart the gateway to use it", markup=False)
+    stdout.print(
+        "connection not verified: importing never contacts the provider",
+        markup=False,
+    )
+
+
+@config_app.command("operation")
+def config_operation(
+    operation_id: str = typer.Argument(..., help="operation id from an import"),
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """Query an import operation: id, commit status and generation only."""
+    with structured_cli_errors(json_output):
+        payload = _check(_call(state_dir, "GET", f"/control/v1/operations/{operation_id}"))
+        if json_output:
+            _print_json(payload)
+            return
+        stdout.print(f"operation: {payload.get('operation_id', operation_id)}", markup=False)
+        stdout.print(f"status: {payload.get('status')}", markup=False)
+        stdout.print(f"generation: {payload.get('generation')}", markup=False)
 
 
 @defaults_app.command("set")
@@ -433,9 +524,20 @@ def defaults_set(
         routes = dict(_parse_route_pair(pair) for pair in route)
         current = _check(_call(state_dir, "GET", "/control/v1/config"))
         config = dict(current.get("config", {}))
+        expected_generation = current.get("generation")
         config["defaults"] = {"model": model, "aux_model": aux_model, "routes": routes}
+        params = {"expected_generation": expected_generation} if isinstance(expected_generation, int) else {}
         payload = _require_applied(
-            _check(_call(state_dir, "PUT", "/control/v1/config", json=config, unconfirmed_action="the defaults update")),
+            _check(
+                _call(
+                    state_dir,
+                    "PUT",
+                    "/control/v1/config",
+                    params=params,
+                    json=config,
+                    unconfirmed_action="the defaults update",
+                )
+            ),
             "defaults update",
         )
         if json_output:
@@ -445,6 +547,35 @@ def defaults_set(
         stdout.print("changes affect new instances only; existing instances keep their snapshots")
 
 
+def _print_run_preview(*, state_dir, model, aux_model, route_overrides) -> None:
+    """Onboarding preview: no registration, no files, no client, no tokens."""
+    payload = _check(_call(state_dir, "GET", "/control/v1/config"))
+    endpoint, _ = _endpoint(state_dir)
+    defaults = payload.get("config", {}).get("defaults", {})
+    chosen_model = model if model is not None else defaults.get("model")
+    chosen_aux = aux_model if aux_model is not None else defaults.get("aux_model")
+    stdout.print("qing run onboarding preview", markup=False)
+    stdout.print(f"  gateway address: {endpoint}", markup=False)
+    stdout.print(f"  main model: {chosen_model if chosen_model is not None else '(none configured)'}", markup=False)
+    stdout.print(f"  aux model: {chosen_aux if chosen_aux is not None else '(none configured)'}", markup=False)
+    for request_key, destination in route_overrides.items():
+        stdout.print(f"  route override: {request_key} -> {destination}", markup=False)
+    stdout.print("  original Claude settings: untouched; hooks and permissions keep working", markup=False)
+    stdout.print(
+        "  during the run: a temporary 0600 settings file carries the gateway transport "
+        "and is deleted on every exit path",
+        markup=False,
+    )
+    stdout.print(
+        "  after exit: plain 'claude' connects directly again with your original configuration",
+        markup=False,
+    )
+    stdout.print(
+        "preview only: no instance is registered, no files are written, no client starts",
+        markup=False,
+    )
+
+
 @app.command("run", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
 def run(
     ctx: typer.Context,
@@ -452,6 +583,11 @@ def run(
     model: Optional[str] = typer.Option(None, "--model", help="main request model (route key)"),
     aux_model: Optional[str] = typer.Option(None, "--aux-model", help="auxiliary request model (route key)"),
     route: list[str] = typer.Option([], "--route", help="REQUEST=DEST route override (repeatable)"),
+    preview: bool = typer.Option(
+        False,
+        "--preview",
+        help="show the onboarding impact without registering, writing files or starting a client",
+    ),
     state_dir: Optional[Path] = StateDirOpt,
     json_output: bool = typer.Option(
         False,
@@ -474,6 +610,14 @@ def run(
         for pair in route:
             request_model, destination = _parse_route_pair(pair)
             route_overrides[request_model] = destination
+        if preview:
+            _print_run_preview(
+                state_dir=state_dir,
+                model=model,
+                aux_model=aux_model,
+                route_overrides=route_overrides,
+            )
+            return
         code = launcher.run_launch(
             state_dir=_state_dir(state_dir),
             label=label,

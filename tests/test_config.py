@@ -205,12 +205,15 @@ def test_v1_credential_id_rejects_traversal_and_bad_format():
         assert any("credential_id" in m for m in msgs), bad
 
 
-def test_v1_generation_required_positive_integer():
+def test_v1_generation_required_non_negative_integer():
     data = _v1_config()
     del data["generation"]
     msgs = problems_for_dict(data)
     assert any("generation" in m for m in msgs)
-    for bad in (0, -1, "3", 1.5, True):
+    # 0 is valid on input: an in-memory legacy configuration serializes
+    # with generation 0 and must round-trip through apply.
+    assert validate_config(_v1_config(generation=0)).generation == 0
+    for bad in (-1, "3", 1.5, True):
         data = _v1_config()
         data["generation"] = bad
         msgs = problems_for_dict(data)

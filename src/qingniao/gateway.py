@@ -8,6 +8,7 @@ behaviour is testable without sleeping.
 from __future__ import annotations
 
 import os
+import threading
 import time
 import uuid
 from collections import deque
@@ -17,6 +18,7 @@ from typing import Callable, Mapping
 from . import errors
 from .config import SharedConfig, ConfigStore
 from .credentials import CredentialStore
+from .importing import ImportPlan
 from .sse import USAGE_KEYS
 from .tokens import new_bearer_token, new_instance_id, token_hash
 
@@ -145,16 +147,78 @@ class Gateway:
         self._by_token: dict[str, str] = {}
         self.records: deque[RequestRecord] = deque(maxlen=MAX_RECORDS)
         self._records_by_id: dict[str, RequestRecord] = {}
+        # Serializes every configuration write entry (apply, defaults,
+        # imports) in this process; the state directory flock already
+        # excludes offline writers.
+        self._write_lock = threading.Lock()
 
     # ------------------------------------------------------------- config
 
-    def apply_config(self, data: object) -> SharedConfig:
+    @property
+    def state_dir(self):
+        return self.config_store.path.parent if self.config_store is not None else None
+
+    def _recover_before_write(self) -> None:
+        from . import transactions
+
+        if self.state_dir is not None:
+            transactions.recover_open_transactions(self.state_dir)
+
+    def apply_config(self, data: object, *, expected_generation: int | None = None) -> SharedConfig:
         if self.config_store is None:
             raise errors.ApiError(500, errors.INVALID_CONFIG, "no configuration store attached")
-        config = self.config_store.apply(data)
-        self.config = config
-        self.config_revision += 1
+        with self._write_lock:
+            self._recover_before_write()
+            config = self.config_store.apply(data, expected_generation=expected_generation)
+            self.config = config
+            self.config_revision += 1
         return config
+
+    def submit_import(self, plan: ImportPlan) -> dict:
+        """Commit an import through the same serialized path as every write.
+
+        The gateway already holds the state directory lock. A repeated
+        operation id with the same plan returns the original result; the
+        same id with a different plan is rejected.
+        """
+        from . import transactions
+
+        if self.config_store is None:
+            raise errors.ApiError(500, errors.INVALID_CONFIG, "no configuration store attached")
+        with self._write_lock:
+            self._recover_before_write()
+            txs = transactions.TransactionStore(self.state_dir)
+            existing = txs.get(plan.operation_id)
+            if existing is not None:
+                digest = existing.get("plan_digest")
+                if digest is not None and digest != transactions.plan_digest(plan):
+                    raise errors.ApiError(
+                        409,
+                        errors.IMPORT_PLAN_MISMATCH,
+                        "this operation id was already used with a different plan",
+                    )
+                conclusion = existing.get("conclusion")
+                if isinstance(conclusion, dict) and conclusion.get("status") in (
+                    "committed",
+                    "aborted",
+                ):
+                    return {
+                        "status": conclusion["status"],
+                        "operation_id": plan.operation_id,
+                        "generation": conclusion.get("generation"),
+                        "provider_id": conclusion.get("provider_id"),
+                        "credential_id": conclusion.get("credential_id"),
+                        "duplicate": True,
+                        "applied": conclusion.get("status") == "committed",
+                    }
+            result = transactions.commit_import_in_gateway(
+                state_dir=self.state_dir, plan=plan
+            )
+            if result.get("status") == "committed":
+                self.config = self.config_store.load()
+                self.config_revision += 1
+                result["applied"] = True
+            return result
 
     def resolve_snapshot(self, request_model: str, catalog_model: str, route_revision: int) -> RouteSnapshot:
         entry = self.config.models.get(catalog_model)

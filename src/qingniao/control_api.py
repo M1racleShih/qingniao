@@ -55,25 +55,91 @@ async def get_config(request: Request):
         require_admin(request, request.app.state.admin_token_hash)
         gateway = gateway_of(request)
         return JSONResponse(
-            {"revision": gateway.config_revision, "config": gateway.config.to_json()}
+            {
+                "revision": gateway.config_revision,
+                "generation": gateway.config.generation,
+                "config": gateway.config.to_json(),
+            }
         )
     except errors.ApiError as exc:
         return error_response(exc)
 
 
+def _expected_generation(request: Request) -> int | None:
+    raw = request.query_params.get("expected_generation")
+    if raw is None:
+        # Requests without the parameter behave as unconditional
+        # last-write-wins, matching pre-generation clients.
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise errors.ApiError(400, errors.INVALID_REQUEST, "expected_generation must be an integer") from exc
+    if value < 0:
+        raise errors.ApiError(400, errors.INVALID_REQUEST, "expected_generation must be >= 0")
+    return value
+
+
 async def put_config(request: Request):
     try:
         require_admin(request, request.app.state.admin_token_hash)
+        expected = _expected_generation(request)
         data = await read_json(request)
         gateway = gateway_of(request)
-        gateway.apply_config(data)
+        gateway.apply_config(data, expected_generation=expected)
         return JSONResponse(
             {
                 "applied": True,
                 "revision": gateway.config_revision,
+                "generation": gateway.config.generation,
                 "config": gateway.config.to_json(),
             }
         )
+    except errors.ApiError as exc:
+        return error_response(exc)
+
+
+MAX_IMPORT_BODY = 256 * 1024
+
+
+async def post_import(request: Request):
+    """Submit a complete import plan; the body may carry a secret and is
+    never logged or echoed."""
+    try:
+        require_admin(request, request.app.state.admin_token_hash)
+        length = request.headers.get("content-length")
+        if length is not None and int(length) > MAX_IMPORT_BODY:
+            raise errors.ApiError(
+                413, errors.REQUEST_TOO_LARGE, "the import plan exceeds the size limit"
+            )
+        data = await read_json(request)
+        from .importing import plan_from_wire
+
+        try:
+            plan = plan_from_wire(data.get("plan"))
+        except Exception as exc:
+            raise errors.ApiError(400, errors.INVALID_REQUEST, "malformed import plan") from exc
+        gateway = gateway_of(request)
+        result = gateway.submit_import(plan)
+        return JSONResponse(result)
+    except errors.ApiError as exc:
+        return error_response(exc)
+    except Exception as exc:
+        return error_response(
+            errors.ApiError(500, errors.UPSTREAM_ERROR, f"import failed ({type(exc).__name__})")
+        )
+
+
+async def get_operation(request: Request):
+    try:
+        require_admin(request, request.app.state.admin_token_hash)
+        gateway = gateway_of(request)
+        from . import transactions
+
+        result = transactions.query_operation(gateway.state_dir, request.path_params["operation_id"])
+        if result is None:
+            raise errors.ApiError(404, errors.OPERATION_NOT_FOUND, "no such operation")
+        return JSONResponse(result)
     except errors.ApiError as exc:
         return error_response(exc)
 
@@ -226,6 +292,8 @@ def build_control_routes() -> list[Route]:
     return [
         Route("/config", get_config, methods=["GET"]),
         Route("/config", put_config, methods=["PUT"]),
+        Route("/imports", post_import, methods=["POST"]),
+        Route("/operations/{operation_id}", get_operation, methods=["GET"]),
         Route("/instances", create_instance, methods=["POST"]),
         Route("/instances", list_instances, methods=["GET"]),
         Route("/instances/{instance_id}", instance_detail, methods=["GET"]),

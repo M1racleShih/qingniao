@@ -143,6 +143,126 @@ def _provider_key(provider: Provider, store: CredentialStore) -> tuple:
     return ("none", url, provider.auth)
 
 
+def plan_to_wire(plan: ImportPlan) -> dict:
+    """Explicit serialization for the authenticated control channel.
+
+    This is the only encoding path that carries the secret; the request
+    body is never logged and errors never echo it.
+    """
+    return {
+        "operation_id": plan.operation_id,
+        "source": str(plan.source),
+        "source_digest": plan.source_digest,
+        "expected_generation": plan.expected_generation,
+        "status": plan.status,
+        "provider_id": plan.provider_id,
+        "base_url": plan.base_url,
+        "auth": plan.auth,
+        "secret": plan.secret,
+        "reuse_credential_id": plan.reuse_credential_id,
+        "models": [
+            {
+                "model_id": m.model_id,
+                "upstream_model": m.upstream_model,
+                "request_keys": list(m.request_keys),
+            }
+            for m in plan.models
+        ],
+        "defaults": None
+        if plan.defaults is None
+        else {
+            "model": plan.defaults.model,
+            "aux_model": plan.defaults.aux_model,
+            "routes": dict(plan.defaults.routes),
+        },
+        "incomplete": list(plan.incomplete),
+        "ignored": list(plan.ignored),
+        "unsupported_auth": list(plan.unsupported_auth),
+        "notes": list(plan.notes),
+    }
+
+
+def _wire_str(data: dict, key: str, *, optional: bool = True) -> str | None:
+    value = data.get(key)
+    if value is None and optional:
+        return None
+    if not isinstance(value, str):
+        raise _wire_error(key)
+    return value
+
+
+def _wire_error(key: str) -> PlanError:
+    return PlanError("invalid_plan", f"malformed import plan field {key!r}")
+
+
+def plan_from_wire(data: object) -> ImportPlan:
+    """Validate a wire plan back into an ImportPlan without echoing content."""
+    if not isinstance(data, dict):
+        raise PlanError("invalid_plan", "the import plan must be an object")
+    try:
+        models = []
+        raw_models = data.get("models", [])
+        if not isinstance(raw_models, list):
+            raise _wire_error("models")
+        for raw in raw_models:
+            if not isinstance(raw, dict):
+                raise _wire_error("models")
+            keys = raw.get("request_keys", [])
+            if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
+                raise _wire_error("models.request_keys")
+            models.append(
+                PlannedModel(
+                    model_id=_wire_str(raw, "model_id", optional=False),
+                    upstream_model=_wire_str(raw, "upstream_model", optional=False),
+                    request_keys=tuple(keys),
+                )
+            )
+        raw_defaults = data.get("defaults")
+        defaults: Defaults | None = None
+        if raw_defaults is not None:
+            if not isinstance(raw_defaults, dict):
+                raise _wire_error("defaults")
+            routes = raw_defaults.get("routes", {})
+            if not isinstance(routes, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in routes.items()
+            ):
+                raise _wire_error("defaults.routes")
+            defaults = Defaults(
+                model=_wire_str(raw_defaults, "model"),
+                aux_model=_wire_str(raw_defaults, "aux_model"),
+                routes=routes,
+            )
+        for key in ("incomplete", "ignored", "unsupported_auth", "notes"):
+            value = data.get(key, [])
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise _wire_error(key)
+        expected = data.get("expected_generation")
+        if isinstance(expected, bool) or not isinstance(expected, int):
+            raise _wire_error("expected_generation")
+        return ImportPlan(
+            operation_id=_wire_str(data, "operation_id", optional=False),
+            source=Path(_wire_str(data, "source", optional=False)),
+            source_digest=_wire_str(data, "source_digest", optional=False),
+            expected_generation=expected,
+            status=_wire_str(data, "status", optional=False),
+            provider_id=_wire_str(data, "provider_id") or "",
+            base_url=_wire_str(data, "base_url") or "",
+            auth=_wire_str(data, "auth") or "",
+            secret=_wire_str(data, "secret") or "",
+            reuse_credential_id=_wire_str(data, "reuse_credential_id"),
+            models=tuple(models),
+            defaults=defaults,
+            incomplete=tuple(data.get("incomplete", [])),
+            ignored=tuple(data.get("ignored", [])),
+            unsupported_auth=tuple(data.get("unsupported_auth", [])),
+            notes=tuple(data.get("notes", [])),
+        )
+    except PlanError:
+        raise
+    except Exception as exc:
+        raise PlanError("invalid_plan", "malformed import plan") from exc
+
+
 def plan_preview(plan: ImportPlan) -> dict:
     """Desensitized JSON-ready view; never includes key material."""
     preview: dict = {

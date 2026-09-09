@@ -247,11 +247,13 @@ def make_gateway_app(tmp_path):
     @asynccontextmanager
     async def _make(config: dict | None = None, clock=None):
         from qingniao.app import build_app
+        from qingniao.credentials import CredentialStore
 
         store = ConfigStore(tmp_path / "config.json")
         gateway = Gateway(
             validate_config(config if config is not None else make_config_dict()),
             store,
+            credential_store=CredentialStore(tmp_path),
             clock=clock or FakeClock(),
         )
         admin_token = "test-admin-token"

@@ -227,9 +227,9 @@ def validate_config(data: object) -> SharedConfig:
     if versioned:
         raw_generation = data.get("generation")
         if raw_generation is None:
-            problems.append(("generation", "is required and must be a positive integer"))
-        elif isinstance(raw_generation, bool) or not isinstance(raw_generation, int) or raw_generation < 1:
-            problems.append(("generation", "must be a positive integer"))
+            problems.append(("generation", "is required and must be a non-negative integer"))
+        elif isinstance(raw_generation, bool) or not isinstance(raw_generation, int) or raw_generation < 0:
+            problems.append(("generation", "must be a non-negative integer"))
         else:
             generation = raw_generation
         raw_operation = data.get("last_operation")

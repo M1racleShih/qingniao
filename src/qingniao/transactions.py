@@ -137,7 +137,12 @@ def recover_open_transactions(state_dir: Path) -> list[dict]:
                         f"transaction {op_id} committed but its credential cannot be "
                         f"read ({exc.code}); restore the credential or roll back manually",
                     ) from exc
-            conclusion = {"status": "committed", "generation": current.generation}
+            conclusion = {
+                "status": "committed",
+                "generation": current.generation,
+                "provider_id": record.get("provider_id"),
+                "credential_id": created,
+            }
         else:
             created = record.get("created_credential_id")
             if isinstance(created, str):
@@ -157,6 +162,23 @@ def recover_open_transactions(state_dir: Path) -> list[dict]:
     return outcomes
 
 
+def query_operation(state_dir: Path, operation_id: object) -> dict | None:
+    """Sanitized operation result: id, commit status and generation only."""
+    if not isinstance(operation_id, str) or not OPERATION_ID_RE.match(operation_id):
+        return None
+    record = TransactionStore(Path(state_dir)).get(operation_id)
+    if record is None:
+        return None
+    conclusion = record.get("conclusion")
+    if not isinstance(conclusion, dict):
+        return {"operation_id": operation_id, "status": "in_progress", "generation": None}
+    return {
+        "operation_id": operation_id,
+        "status": conclusion.get("status", "unknown"),
+        "generation": conclusion.get("generation"),
+    }
+
+
 def commit_import_offline(*, state_dir: Path, plan: ImportPlan, raw_source: bytes) -> dict:
     """Commit an import while holding the state directory's exclusive lock."""
     state_dir = Path(state_dir)
@@ -164,121 +186,137 @@ def commit_import_offline(*, state_dir: Path, plan: ImportPlan, raw_source: byte
     lock = state_mod.GatewayLock(state_dir)
     lock.acquire()  # raises gateway_locked when a gateway owns the directory
     try:
-        store = ConfigStore(state_dir / state_mod.CONFIG_NAME)
-        creds = CredentialStore(state_dir)
-        txs = TransactionStore(state_dir)
-        recover_open_transactions(state_dir)
+        return _commit_import(state_dir=state_dir, plan=plan, raw_source=raw_source)
+    finally:
+        lock.release()
+
+
+def commit_import_in_gateway(*, state_dir: Path, plan: ImportPlan) -> dict:
+    """Commit an import from the running gateway, which already holds the
+    state directory lock; every write entry shares this serialized path."""
+    return _commit_import(state_dir=Path(state_dir), plan=plan, raw_source=None)
+
+
+def _commit_import(*, state_dir: Path, plan: ImportPlan, raw_source: bytes | None) -> dict:
+    store = ConfigStore(state_dir / state_mod.CONFIG_NAME)
+    creds = CredentialStore(state_dir)
+    txs = TransactionStore(state_dir)
+    recover_open_transactions(state_dir)
+    if raw_source is not None:
         verify_source_unchanged(plan.source_digest, raw_source)
-        current = store.load()
-        if plan.expected_generation != current.generation:
-            raise errors.ApiError(
-                409,
-                errors.GENERATION_CONFLICT,
-                "the configuration changed since the preview; preview again",
-                current_generation=current.generation,
-            )
-        if plan.status == "skipped":
-            return {"status": "skipped", "operation_id": plan.operation_id}
-        if plan.status == "unchanged":
-            return {
-                "status": "unchanged",
-                "operation_id": plan.operation_id,
-                "generation": current.generation,
-                "provider_id": plan.provider_id,
-                "credential_id": plan.reuse_credential_id,
-            }
-
-        record = {
+    current = store.load()
+    if plan.expected_generation != current.generation:
+        raise errors.ApiError(
+            409,
+            errors.GENERATION_CONFLICT,
+            "the configuration changed since the preview; preview again",
+            current_generation=current.generation,
+        )
+    if plan.status == "skipped":
+        return {"status": "skipped", "operation_id": plan.operation_id}
+    if plan.status == "unchanged":
+        return {
+            "status": "unchanged",
             "operation_id": plan.operation_id,
-            "expected_generation": plan.expected_generation,
-            "created_credential_id": None,
-            "backup_path": None,
-            "plan_digest": plan_digest(plan),
-            "conclusion": None,
+            "generation": current.generation,
+            "provider_id": plan.provider_id,
+            "credential_id": plan.reuse_credential_id,
         }
-        txs.open(record)
-        committed = False
-        resolved = False
-        credential_id = plan.reuse_credential_id
-        try:
-            if credential_id is None and plan.secret:
-                credential_id = creds.create(plan.secret)
-                record["created_credential_id"] = credential_id
-                txs.open(record)
-            upgraded = store.backup_legacy_now()
-            if upgraded is not None and upgraded[1]:
-                record["backup_path"] = upgraded[0]
-                txs.open(record)
 
-            data = current.to_json()
-            # Upgrade the payload's generation for validation; apply()
-            # re-verifies against the on-disk file under the same lock.
-            data["generation"] = plan.expected_generation + 1
-            provider: dict = {"base_url": plan.base_url, "auth": plan.auth}
-            if credential_id is not None:
-                provider["credential_id"] = credential_id
-            data["providers"][plan.provider_id] = provider
-            for model in plan.models:
-                data["models"][model.model_id] = {
-                    "provider": plan.provider_id,
-                    "upstream_model": model.upstream_model,
-                }
-            if plan.defaults is not None:
-                data["defaults"] = {
-                    "model": plan.defaults.model,
-                    "aux_model": plan.defaults.aux_model,
-                    "routes": dict(plan.defaults.routes),
-                }
-            try:
-                config = store.apply(
-                    data,
-                    expected_generation=plan.expected_generation,
-                    operation_id=plan.operation_id,
-                )
-            except errors.ApiError as exc:
-                if exc.code == errors.CONFIG_PERSIST_FAILED:
-                    txs.conclude(
-                        plan.operation_id,
-                        {"status": "unconfirmed", "generation": plan.expected_generation},
-                    )
-                    resolved = True
-                    return {
-                        "status": "unconfirmed",
-                        "operation_id": plan.operation_id,
-                        "message": "the commit result is uncertain; it will be resolved "
-                        "by recovery on the next write or gateway start",
-                    }
-                raise
-            committed = True
-            txs.conclude(
-                plan.operation_id,
-                {"status": "committed", "generation": config.generation},
+    record = {
+        "operation_id": plan.operation_id,
+        "expected_generation": plan.expected_generation,
+        "created_credential_id": None,
+        "backup_path": None,
+        "plan_digest": plan_digest(plan),
+        "conclusion": None,
+    }
+    txs.open(record)
+    committed = False
+    resolved = False
+    credential_id = plan.reuse_credential_id
+    try:
+        if credential_id is None and plan.secret:
+            credential_id = creds.create(plan.secret)
+            record["created_credential_id"] = credential_id
+            txs.open(record)
+        upgraded = store.backup_legacy_now()
+        if upgraded is not None and upgraded[1]:
+            record["backup_path"] = upgraded[0]
+            txs.open(record)
+
+        data = current.to_json()
+        # Upgrade the payload's generation for validation; apply()
+        # re-verifies against the on-disk file under the same lock.
+        data["generation"] = plan.expected_generation + 1
+        provider: dict = {"base_url": plan.base_url, "auth": plan.auth}
+        if credential_id is not None:
+            provider["credential_id"] = credential_id
+        data["providers"][plan.provider_id] = provider
+        for model in plan.models:
+            data["models"][model.model_id] = {
+                "provider": plan.provider_id,
+                "upstream_model": model.upstream_model,
+            }
+        if plan.defaults is not None:
+            data["defaults"] = {
+                "model": plan.defaults.model,
+                "aux_model": plan.defaults.aux_model,
+                "routes": dict(plan.defaults.routes),
+            }
+        try:
+            config = store.apply(
+                data,
+                expected_generation=plan.expected_generation,
+                operation_id=plan.operation_id,
             )
-            return {
+        except errors.ApiError as exc:
+            if exc.code == errors.CONFIG_PERSIST_FAILED:
+                txs.conclude(
+                    plan.operation_id,
+                    {"status": "unconfirmed", "generation": plan.expected_generation},
+                )
+                resolved = True
+                return {
+                    "status": "unconfirmed",
+                    "operation_id": plan.operation_id,
+                    "message": "the commit result is uncertain; it will be resolved "
+                    "by recovery on the next write or gateway start",
+                }
+            raise
+        committed = True
+        txs.conclude(
+            plan.operation_id,
+            {
                 "status": "committed",
-                "operation_id": plan.operation_id,
                 "generation": config.generation,
                 "provider_id": plan.provider_id,
                 "credential_id": credential_id,
-                "upgraded_from_legacy": store.last_upgrade is not None,
-            }
-        finally:
-            if not committed and not resolved:
-                # Pre-commit failure: this operation's staged products are
-                # removed and the record closed as aborted.
-                try:
-                    if record.get("created_credential_id"):
-                        creds.delete(record["created_credential_id"])
-                    if record.get("backup_path"):
-                        try:
-                            (state_dir / record["backup_path"]).unlink()
-                        except OSError:
-                            pass
-                    txs.conclude(
-                        plan.operation_id,
-                        {"status": "aborted", "generation": plan.expected_generation},
-                    )
-                except Exception:
-                    pass
+            },
+        )
+        return {
+            "status": "committed",
+            "operation_id": plan.operation_id,
+            "generation": config.generation,
+            "provider_id": plan.provider_id,
+            "credential_id": credential_id,
+            "upgraded_from_legacy": store.last_upgrade is not None,
+        }
     finally:
-        lock.release()
+        if not committed and not resolved:
+            # Pre-commit failure: this operation's staged products are
+            # removed and the record closed as aborted.
+            try:
+                if record.get("created_credential_id"):
+                    creds.delete(record["created_credential_id"])
+                if record.get("backup_path"):
+                    try:
+                        (state_dir / record["backup_path"]).unlink()
+                    except OSError:
+                        pass
+                txs.conclude(
+                    plan.operation_id,
+                    {"status": "aborted", "generation": plan.expected_generation},
+                )
+            except Exception:
+                pass
