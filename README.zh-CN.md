@@ -16,7 +16,7 @@
   <a href="CONTRIBUTING.md">参与贡献（英文）</a>
 </p>
 
-> **早期开发——核心已可运行。** 网关、`qing` CLI、按实例的模型路由和 Claude Code 启动器已经实现，可以在本仓库用 `uv` 复现（见[试用开发切片](#try-it)）。目前没有发布包、注册表版本或全新安装方式。真实供应商证据仅覆盖下文说明的两个已测配置（MiniMax M3 与 glm-5.3-flash），不覆盖任何其他供应商、端点或模型；下文提到的首版能力（配置预览/备份/恢复、发布安装）仍在建设中。
+> **早期开发——核心已可运行。** 网关、`qing` CLI、按实例的模型路由、Claude Code 启动器和 `qing config import-claude` 配置导入（含本地私密凭证存储）已经实现，可以在本仓库用 `uv` 复现（见[试用开发切片](#try-it)）。目前没有发布包、注册表版本或全新安装方式。真实供应商证据仅覆盖下文说明的两个已测配置（MiniMax M3 与 glm-5.3-flash），不覆盖任何其他供应商、端点或模型；导入流程本身仅用本地合成夹具验证；下文提到的首版能力（发布安装）仍在建设中。
 
 ## 换个模型，不该还要换一份配置
 
@@ -32,7 +32,7 @@
 
 首版通过终端中的 `qing` 完成操作，清晰的布局、易读的状态反馈和有用的错误提示都是[终端体验规划（英文）](docs/terminal-experience.md)的一部分。Web GUI 根据实际使用情况再决定。
 
-**接入一次，准备就绪。** 通过 `qing` 添加供应商和模型，检查连接，再把 Claude Code 接入青鸟。修改配置前可以预览，也能恢复原有配置。
+**接入一次，准备就绪。** 用 `qing config import-claude` 导入现有 Claude 配置——先出脱敏预览，再显式应用：凭证存入本地私密存储（0600 明文文件，不是加密保险箱），原文件保持不变。也可以用 `qing config apply` 手工添加供应商和模型。
 
 **切换模型，不再重复配置。** 多个 Claude Code 实例共享供应商与凭证配置，各自独立选择模型。通过 `qing` 修改指定实例的路由，不改变其他实例。网关确认更新后，该实例的新请求使用新路由，已经进行中的请求保持原有去向，无需重启。修改默认值仅影响新实例。
 
@@ -64,13 +64,15 @@ Claude Code              青鸟                     你的供应商
 
 ```
 uv sync --locked --extra dev
-export MY_PROVIDER_TOKEN=...        # 配置引用的凭证环境变量；不会写进配置文件
+uv run qing config import-claude            # 预览导入 ~/.claude/settings.json（零写入）
+uv run qing config import-claude --apply    # 保存连接与私密凭证，原文件不变
 uv run qing serve &                 # 本地回环网关（控制令牌在状态目录中）
-uv run qing config apply my-config.json
 uv run qing run --label work        # 注册实例并启动 Claude Code
 uv run qing instances               # 路由、revision 与各实例状态
 uv run qing requests                # 脱敏的请求元数据（用量未知 vs 真实 0）
 ```
+
+也可以跳过导入，直接引用已 export 的环境变量（在 `qing serve` 之前 `export MY_PROVIDER_TOKEN=...`；凭证值不会写进配置文件）。`qing run --preview` 可以在不注册任何实例的情况下预览接入影响。
 
 凭证必须在启动 `qing serve` 的 shell 中**事先** export；之后在其他 shell 里 export 不会影响正在运行的网关。`qing run` 每次启动（包括 `--resume`）都生成新的实例身份，通过临时 0600 设置文件注入传输配置（绝不进入 argv），保留你的 Claude 配置、会话历史与工具，并如实区分：已注册 / 子进程已启动 / 网关观察到首个请求。详见 [docs/development.md](docs/development.md) 与 [docs/api.md](docs/api.md)。
 

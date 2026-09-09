@@ -40,9 +40,15 @@ Every **gateway-generated** error is JSON with a stable `code`:
 | `instance_token_not_admin` | 403 | instance token used on `/control/v1` |
 | `instance_ended` / `instance_expired` | 403 | lifecycle rejection |
 | `instance_not_found` | 404 | unknown instance ID |
+| `operation_not_found` | 404 | unknown import operation ID |
 | `revision_conflict` | 409 | CAS mismatch (`current_revision` included) |
-| `credential_missing` | 500 | provider env var absent at request time (no upstream call) |
+| `generation_conflict` | 409 | conditional write with a stale generation (`current_generation` included) |
+| `import_plan_mismatch` | 409 | operation id reused with a different plan |
+| `request_too_large` | 413 | import plan body above the size limit |
+| `credential_missing` | 500 | credential source absent at request time — env var unset, private version not present (no upstream call) |
+| `credential_invalid` / `credential_unreadable` | 500 | private credential store refused the access (malformed id, unsafe permissions, symlink, foreign owner, non-regular file); sanitized category only |
 | `config_persist_failed` | 500 | configuration validated but could not be persisted (disk state and running config unchanged) |
+| `transaction_damaged` | 500 | an open import record or its committed credential is unreadable; writes and startup refuse until it is resolved manually |
 | `upstream_error` | 502 | upstream connection failure |
 | `gateway_locked` | CLI exit 2 | another gateway owns the state directory |
 
@@ -59,13 +65,73 @@ the `Error` schema or a verbatim `UpstreamRelay` body under any media type.
 
 ## Control endpoints
 
-### `GET /control/v1/config`
-→ `200 {"revision": 3, "config": {...}}`
+### Configuration format
 
-### `PUT /control/v1/config`
+Requests may carry the legacy format (no `schema_version`, environment
+variable credentials only); responses and every persisted write use
+format version 1:
+
+```json
+{
+  "schema_version": 1,
+  "generation": 3,
+  "last_operation": "op_<hex> or null",
+  "providers": {"p": {"base_url": "https://…", "credential_env": "NAME",
+                      "auth": "bearer"}},
+  "models": {"m": {"provider": "p", "upstream_model": "exact-upstream"}},
+  "defaults": {"model": "r", "aux_model": "r2", "routes": {"r": "m"}}
+}
+```
+
+A provider carries **exactly one** credential source: `credential_env`
+(read from the gateway process) or `credential_id` (an immutable version
+in the private credential store under `<state-dir>/credentials`, created
+by `qing config import-claude`; the secret itself never appears in the
+configuration, responses or logs). Unknown future `schema_version`
+values are rejected — never migrated or overwritten. The first write
+that upgrades a legacy file snapshots the old bytes as
+`config.backup.pre-v1.json`; to roll back, stop the gateway, restore
+that backup and use the older program (imported private connections do
+not carry back and their files are not auto-deleted).
+
+`generation` increases with every persisted write and enables
+conditional updates; `last_operation` identifies the import transaction
+that last committed the file.
+
+### `GET /control/v1/config`
+→ `200 {"revision": 3, "generation": 3, "config": {...}}`
+
+### `PUT /control/v1/config[?expected_generation=N]`
 Body: the complete configuration object. Validates everything, persists
-atomically, then swaps catalog and defaults.
-→ `200 {"applied": true, "revision": 4, "config": {...}}` or `400 invalid_config`.
+atomically, then swaps catalog and defaults. With `expected_generation`
+the write is conditional: a mismatch answers
+`409 generation_conflict` with `current_generation` and changes nothing;
+without it the request behaves as unconditional last-write-wins
+(pre-generation clients keep working).
+→ `200 {"applied": true, "revision": 4, "generation": 4, "config": {...}}`,
+`400 invalid_config` or `409 generation_conflict`.
+
+### `POST /control/v1/imports`
+Body: `{"operation_id": "op_<hex>", "plan": {…}}` — the complete
+wire-encoded plan that `qing config import-claude --apply` builds (max
+256 KiB). The plan may carry the secret for the private store; the body
+is never logged and errors never echo it. Commits one transaction
+through the same serialized path as every configuration write.
+Repeating an operation id with the same plan returns the original
+result (`"duplicate": true`); the same id with a different plan answers
+`409 import_plan_mismatch`.
+→ `200 {"status": "committed|unchanged|skipped", "applied": true,
+"generation": 4, "provider_id": "…", "credential_id": "cred_<hex>", …}`.
+`applied` is true only when the running gateway swapped the new
+configuration in; a persist failure at the commit point answers with
+`"status": "unconfirmed"` and recovery resolves it — never assume it
+rolled back.
+
+### `GET /control/v1/operations/{operation_id}`
+→ `200 {"operation_id": "op_…", "status":
+"in_progress|committed|aborted|unconfirmed", "generation": 4}` or `404
+operation_not_found`. Id, commit status and generation only — no
+credentials, no plan content.
 
 ### `POST /control/v1/instances`
 Body (all optional): `{"label"?, "model"?, "aux_model"?, "routes"?}` where
@@ -87,7 +153,13 @@ Instance status shape:
 }
 ```
 
-`state` is `active`, `expired` (lease lapsed) or `ended`.
+`state` is `active`, `expired` (lease lapsed) or `ended`. Route
+snapshots created after an import may carry `"credential_id":
+"cred_<hex>"` instead of `credential_env`; the id is a reference, never
+the secret. Snapshots are immutable: rotating a provider's credential
+does not change existing instances or in-flight requests — only new
+instances or an explicit route switch pick up the new version, and a
+revoked old credential fails honestly without automatic fallback.
 
 ### `GET /control/v1/instances?offset=0&limit=50`
 Bounded pagination: `limit` defaults to 50 and is clamped to 100;
@@ -169,13 +241,32 @@ exit, 2 for usage/registration failures, 3 when the instance was lost.
 
 ## CLI equivalents
 
-`qing serve`, `qing run`, `qing config show|apply`, `qing defaults set`,
-`qing instances`, `qing instance end <id>`, `qing requests`, `qing route
-set <request-model> <catalog-model> --instance <id|label>` (labels must resolve uniquely;
-ambiguous labels error with the candidate IDs). Every command accepts
-`--json` and `--state-dir`.
+`qing serve`, `qing run [--preview]`, `qing config
+show|apply|import-claude|operation`, `qing defaults set`, `qing
+instances`, `qing instance end <id>`, `qing requests`, `qing route
+set <request-model> <catalog-model> --instance <id|label>` (labels must
+resolve uniquely; ambiguous labels error with the candidate IDs). Every
+command accepts `--json` and `--state-dir`.
+
+`qing config import-claude [--source PATH]` previews a desensitized
+import plan by default — nothing is written and no provider is
+contacted. `--apply` commits it: offline (holding the state directory
+lock) when the gateway is stopped — the result is reported as *saved* —
+or through `POST /control/v1/imports` when it is running, reported as
+*applied*. Both wordings state that the connection is **not verified**:
+importing never contacts the provider. Decision flags make the flow
+non-interactive: `--auth bearer|x-api-key` (both tokens present),
+`--primary-model settings|env` (conflicting main model sources),
+`--aux-same-as-primary` (explicitly reuse the main model), and
+`--conflict skip|update|new [--new-provider-id ID]` for same-name
+collisions with different content; missing decisions fail with zero
+writes. The source file is never modified, and a preview is invalidated
+when the file changes before the apply. `qing config operation <id>`
+queries a submitted operation.
 
 Route changes are only reported as applied on a well-formed acknowledgement
 matching the intended instance, request model, destination and expected
 next revision; timeouts report the effect as unconfirmed and point at
-reading the instance status back.
+reading the instance status back. Import submits follow the same rule:
+a timeout queries the operation once and otherwise stays unconfirmed —
+never falling back to an offline write under a running gateway.

@@ -49,27 +49,66 @@ with an error instead of disturbing the running one.
 
 ## First configuration
 
-Credentials live in the gateway process environment, never in files (see
-above: export them before `qing serve`):
+Two credential sources exist:
+
+1. **Environment variables** — export them in the gateway shell before
+   `qing serve` (see above) and reference them as `credential_env`.
+2. **Private credential store** — import an existing Claude settings file;
+   the secret is stored as a 0600 file under `credentials/` in the state
+   directory and referenced as `credential_id`. Plain local files with
+   restrictive permissions, not an encrypted vault.
 
 ```
 uv run qing config apply examples/qingniao-config.example.json
 uv run qing config show
+uv run qing config import-claude            # desensitized preview, zero writes
+uv run qing config import-claude --apply    # commit one import transaction
 ```
 
+The import reads one Claude settings file (explicit `--source PATH`, else
+`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`),
+never modifies it, never executes hooks or `apiKeyHelper`, and keeps the
+upstream model strings verbatim. `--apply` runs offline when the gateway
+is stopped (the result is *saved*) and through the authenticated control
+API when it is running (*applied*); both explicitly say the connection is
+**not verified** — importing never contacts the provider. Decision flags
+(`--auth`, `--primary-model`, `--aux-same-as-primary`, `--conflict`,
+`--new-provider-id`) make it non-interactive; missing decisions fail with
+zero writes. The first write that upgrades a legacy configuration
+snapshots the old bytes as `config.backup.pre-v1.json`; the versioned
+format is not guaranteed to be readable by older binaries, and rollback
+means restoring that backup with the older program. Re-importing the same
+source is a no-op; gateway tokens (`qn_`-prefixed) and the gateway's own
+loopback address are refused as self-reference (reverse proxy aliases
+cannot be detected offline).
+
 See `examples/README.md` for the schema walkthrough. `qing defaults set`
-replaces the complete defaults and only affects instances created afterwards.
+replaces the complete defaults and only affects instances created
+afterwards. `qing run --preview` shows the onboarding impact without
+registering an instance or writing anything.
 
 ## Project layout
 
-- `src/qingniao/config.py` — shared configuration schema, validation, atomic persistence
-- `src/qingniao/gateway.py` — instances, immutable route snapshots, leases, CAS updates
+- `src/qingniao/config.py` — shared configuration schema (format version 1 with
+  legacy read-only compatibility), validation, atomic persistence, generation
+- `src/qingniao/gateway.py` — instances, immutable typed-credential route
+  snapshots, leases, CAS updates, the serialized write path
 - `src/qingniao/state.py` — state directory, discovery file, single-gateway guard
+- `src/qingniao/credentials.py` — private immutable credential store
+  (0700/0600, symlink/owner/mode/type checks, fsynced writes)
+- `src/qingniao/claude_source.py` — one-file Claude settings parsing into
+  import candidates (no execution of hooks or helpers)
+- `src/qingniao/importing.py` — desensitized planning: exact model mapping,
+  decisions, dedup, conflicts, self-reference, wire encoding
+- `src/qingniao/transactions.py` — the single logical import commit:
+  staging, backup, receipt, recovery, orphan cleanup, operation queries
 - `src/qingniao/control_api.py` — `/control/v1` administration endpoints
+  (config, imports, operations, instances, requests)
 - `src/qingniao/proxy_api.py` — `/v1/messages` forwarding to upstreams
-- `src/qingniao/app.py`, `src/qingniao/serve.py` — ASGI assembly and foreground server
+- `src/qingniao/app.py`, `src/qingniao/serve.py` — ASGI assembly and
+  foreground server (startup recovery before accepting anything)
 - `src/qingniao/cli.py` — `qing` command line interface
-- `tests/` — unit, ASGI-level and real-TCP end-to-end tests
+- `tests/` — unit, ASGI-level, real-TCP and CLI-subprocess end-to-end tests
 
 ## Test suite
 
@@ -100,6 +139,18 @@ replaces the complete defaults and only affects instances created afterwards.
   and route switch, and connection release proven by upstream EOF
   observation for cancellations before headers, mid-stream, and during
   buffered/error body reads
+- imports: parser and planner matrices (sources, decisions, dedup,
+  conflicts, self-reference), transaction boundaries with fault
+  injection and recovery (orphan cleanup, damaged records refusing
+  writes/startup), the authenticated import and operation-query API
+  (races, retries, size limit, sanitization), rotation keeping snapshots
+  and in-flight streams on immutable versions, CLI matrices (exit codes,
+  missing-decision zero writes, JSON, 40/80/120 columns, NO_COLOR and
+  redirect), synthetic-secret scans across every artifact, and the local
+  end-to-end matrix: temp HOME, synthetic settings, no provider
+  variables, offline/online import, a real gateway process, a fake
+  Claude client through `qing run`, restart persistence — local fixtures
+  only, never a real-provider claim
 
 ## Running Claude Code through the launcher
 
@@ -137,6 +188,9 @@ Reproduce with both credentials exported in the gateway shell: `uv run --locked 
 ## Current limitations
 
 - Real-provider evidence covers only the two validated configurations above; every other provider, endpoint and model is untested, and the loopback synthetic fixtures remain the regression baseline.
-- Claude Code settings preview/backup/restore and a published installation
-  path are not implemented (first-release items).
+- The import path is verified against synthetic local fixtures only; no
+  real provider has been reached through an import. Reverse proxy aliases
+  that loop back to the gateway cannot be detected by the offline
+  self-reference check.
+- A published installation path is not implemented (first-release item).
 - The launcher has been exercised against Claude Code 2.1.251 on Linux only.

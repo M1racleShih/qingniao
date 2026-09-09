@@ -2,7 +2,7 @@
 
 The first milestone is one complete terminal workflow: connect Claude Code once, select between two configured models from different providers, and inspect what happened to each request.
 
-Status: the core development slice is implemented and reproducible from this repository with `uv` — loopback gateway, shared catalog with validation, per-instance routing with CAS updates, streaming and non-streaming forwarding with sanitized request records, the `qing run` launcher for Claude Code (fresh identity per launch, temporary 0600 settings injection, lease renewal, signal forwarding), and the terminal/JSON output contract. Not yet done: verification against real provider endpoints, configuration preview/backup/restore, a published installation path, and tested clean Linux installs. Those remain part of the first runnable release below.
+Status: the core development slice is implemented and reproducible from this repository with `uv` — loopback gateway, shared catalog with validation (explicit format version 1 with a pre-upgrade backup of legacy files), per-instance routing with CAS updates, streaming and non-streaming forwarding with sanitized request records, the `qing run` launcher for Claude Code (fresh identity per launch, temporary 0600 settings injection, lease renewal, signal forwarding), the terminal/JSON output contract, and `qing config import-claude` with a local private credential store (one-transaction import, dedup, rotation keeping existing instances on their snapshots, recovery). Import-path verification is local-synthetic only. Not yet done: verification against real provider endpoints through the import path, a published installation path, and tested clean Linux installs. Those remain part of the first runnable release below.
 
 Python is the selected primary language for the first gateway and `qing` CLI. Specific libraries and distribution tooling remain implementation choices.
 
@@ -15,7 +15,7 @@ Python is the selected primary language for the first gateway and `qing` CLI. Sp
 - Defaults for new instances; changing defaults or one instance does not change other existing instances. Switch results identify the affected instance.
 - Live route updates for new requests, with each request in progress retaining its original destination.
 - A polished [terminal experience](terminal-experience.md), including readable layouts, complete state feedback, and plain output for redirected streams.
-- Claude Code settings preview, backup, narrowly scoped updates, and restoration.
+- Claude Code settings import (`qing config import-claude`) is implemented for one explicit settings file with a desensitized preview and an untouched source; broader settings management (narrowly scoped updates of global settings, restoration flows) is not.
 - Request history in the terminal showing destination, outcome, timing, and provider-reported usage. Incomplete usage is marked unknown.
 - A usable `qing` command, a published installation path, and tested documentation for Linux.
 

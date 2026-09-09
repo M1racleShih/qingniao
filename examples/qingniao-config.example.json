@@ -1,4 +1,7 @@
 {
+  "schema_version": 1,
+  "generation": 1,
+  "last_operation": null,
   "providers": {
     "dev-fixture": {
       "base_url": "http://127.0.0.1:9911",

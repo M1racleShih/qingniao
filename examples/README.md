@@ -2,23 +2,34 @@
 
 ## Shared configuration sample
 
-`qingniao-config.example.json` shows the complete shared configuration schema:
+`qingniao-config.example.json` shows the complete shared configuration
+schema in format version 1:
 
+- `schema_version` pins the format (unknown future versions are rejected,
+  never migrated); `generation` increases with every persisted write and
+  `last_operation` records the import transaction that last committed the
+  file, when any.
 - `providers` map a provider ID to an Anthropic-compatible API root
   (`base_url`, loopback `http` fixtures for development, `https` for real
-  endpoints), the name of the environment variable that holds the credential
-  (`credential_env`), and the header style (`auth`: `bearer` or `x-api-key`).
+  endpoints), **exactly one** credential source — the name of the
+  environment variable that holds the credential (`credential_env`) or a
+  private credential id (`credential_id`, created by `qing config
+  import-claude`) — and the header style (`auth`: `bearer` or `x-api-key`).
 - `models` map a catalog model ID to a provider and the exact upstream model
   string sent to that provider.
 - `defaults` name the default main and auxiliary request models and the
   default route table (`routes` maps the exact request model string a client
   sends to a catalog model ID).
 
-Credential values never live in this file. The gateway process reads them
-from its own environment at request time, so the referenced variables (for
-example `QING_DEV_FIXTURE_TOKEN`) must be exported in the shell that starts
-`qing serve`; exporting them later in another shell does not update a running
-gateway.
+Credential values never live in this file. Providers with
+`credential_env` are read from the gateway process's own environment at
+request time, so the referenced variables (for example
+`QING_DEV_FIXTURE_TOKEN`) must be exported in the shell that starts `qing
+serve`; exporting them later in another shell does not update a running
+gateway. Providers with `credential_id` read an immutable 0600 file under
+`credentials/` in the state directory — created by `qing config
+import-claude`, readable across gateway restarts, and a plain local file
+store, not an encrypted vault.
 
 Apply it with:
 

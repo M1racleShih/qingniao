@@ -99,7 +99,6 @@
         "type": "object",
         "required": [
           "base_url",
-          "credential_env",
           "auth"
         ],
         "additionalProperties": false,
@@ -110,7 +109,8 @@
           },
           "credential_env": {
             "type": "string",
-            "description": "Name of the environment variable holding the credential in the gateway process. Values are never stored."
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "description": "Name of the environment variable holding the credential in the gateway process. Exactly one of credential_env or credential_id must be present. Values are never stored."
           },
           "auth": {
             "type": "string",
@@ -118,8 +118,36 @@
               "bearer",
               "x-api-key"
             ]
+          },
+          "credential_id": {
+            "type": "string",
+            "pattern": "^cred_[0-9a-f]{32}$",
+            "description": "Id of an immutable version in the private credential store (credentials/ directory, 0700/0600). Exactly one of credential_env or credential_id must be present. The secret value never appears in the configuration."
           }
-        }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "credential_env"
+            ],
+            "not": {
+              "required": [
+                "credential_id"
+              ]
+            }
+          },
+          {
+            "required": [
+              "credential_id"
+            ],
+            "not": {
+              "required": [
+                "credential_env"
+              ]
+            }
+          }
+        ],
+        "description": "A provider connection with exactly one credential source: an environment variable read from the gateway process or a private credential version created by an import."
       },
       "ModelEntry": {
         "type": "object",
@@ -187,8 +215,29 @@
                 }
               }
             }
+          },
+          "schema_version": {
+            "type": "integer",
+            "enum": [
+              1
+            ],
+            "description": "Explicit format version. Absent means the legacy format on input; responses always carry 1."
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Persistent monotonic write counter; 0 means not yet written in format version 1. Use it as expected_generation for conditional writes."
+          },
+          "last_operation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^op_[0-9a-f]{32}$",
+            "description": "Id of the most recent import transaction that committed this configuration, when any."
           }
-        }
+        },
+        "description": "The shared configuration. Requests may carry the legacy format without schema_version (environment-variable credentials only); responses and every persisted write use format version 1 with an explicit generation. Unknown future versions are rejected, never migrated or overwritten."
       },
       "RouteStatus": {
         "type": "object",
@@ -220,6 +269,11 @@
           },
           "route_revision": {
             "type": "integer"
+          },
+          "credential_id": {
+            "type": "string",
+            "pattern": "^cred_[0-9a-f]{32}$",
+            "description": "Private credential id, present when the snapshot references the private store instead of an environment variable."
           }
         }
       },
@@ -441,6 +495,107 @@
             ]
           }
         }
+      },
+      "ImportSubmitRequest": {
+        "type": "object",
+        "required": [
+          "plan"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "pattern": "^op_[0-9a-f]{32}$",
+            "description": "Client-generated operation id; repeating it with the same plan returns the original result, a different plan is rejected."
+          },
+          "plan": {
+            "type": "object",
+            "description": "Complete wire-encoded import plan produced by 'qing config import-claude'. May carry the secret for the private store; the body is never logged and errors never echo it.",
+            "additionalProperties": true
+          }
+        }
+      },
+      "ImportResult": {
+        "type": "object",
+        "required": [
+          "status",
+          "operation_id"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "committed",
+              "unchanged",
+              "skipped",
+              "aborted",
+              "unconfirmed"
+            ]
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "generation": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Configuration generation after the operation."
+          },
+          "provider_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Provider the import wrote, when it wrote one."
+          },
+          "credential_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Private credential id (an id, never the secret)."
+          },
+          "applied": {
+            "type": "boolean",
+            "description": "True only when the running gateway swapped it in."
+          },
+          "duplicate": {
+            "type": "boolean",
+            "description": "True when an earlier identical operation already completed."
+          }
+        },
+        "description": "Sanitized import outcome; never contains secret material."
+      },
+      "OperationStatus": {
+        "type": "object",
+        "required": [
+          "operation_id",
+          "status"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "in_progress",
+              "committed",
+              "aborted",
+              "unconfirmed"
+            ]
+          },
+          "generation": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "description": "Operation query result: id, commit status and generation only."
       }
     }
   },
@@ -466,6 +621,10 @@
                     },
                     "config": {
                       "$ref": "#/components/schemas/SharedConfig"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "description": "Persisted configuration generation (0 for a legacy or absent file)."
                     }
                   }
                 }
@@ -496,7 +655,7 @@
       },
       "put": {
         "summary": "Replace the complete shared configuration",
-        "description": "Validates wholly, persists atomically, then swaps catalog and defaults. Invalid input changes nothing. Existing instance snapshots are never modified.",
+        "description": "Validates wholly, persists atomically (conditionally on expected_generation), then swaps catalog and defaults. Invalid input changes nothing. The first write that upgrades a legacy file snapshots it as config.backup.pre-v1.json. Existing instance snapshots are never modified.",
         "security": [
           {
             "controlToken": []
@@ -528,6 +687,10 @@
                     },
                     "config": {
                       "$ref": "#/components/schemas/SharedConfig"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "description": "Generation of the newly persisted configuration."
                     }
                   }
                 }
@@ -563,8 +726,30 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Stale expected_generation (current_generation included)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "expected_generation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Conditional write: the request is rejected with 409 generation_conflict when the persisted generation differs. Omitted (pre-generation clients) means unconditional last-write-wins."
+          }
+        ]
       }
     },
     "/control/v1/instances": {
@@ -1465,6 +1650,153 @@
           },
           "400": {
             "description": "Invalid pagination parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong control token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Instance token used on the control API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/control/v1/imports": {
+      "post": {
+        "summary": "Submit a complete import plan",
+        "description": "Commits one import transaction through the same serialized path as every configuration write. Repeating an operation id with the same plan returns the original result; the same id with a different plan is rejected. The request body is limited to 256 KiB and never logged.",
+        "security": [
+          {
+            "controlToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportSubmitRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sanitized import result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed plan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Same operation id with a different plan, or stale expected generation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the size limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong control token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Instance token used on the control API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/control/v1/operations/{operation_id}": {
+      "get": {
+        "summary": "Query an import operation",
+        "description": "Returns the id, commit status and generation of an import operation. Never contains credentials.",
+        "security": [
+          {
+            "controlToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^op_[0-9a-f]{32}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown operation id",
             "content": {
               "application/json": {
                 "schema": {

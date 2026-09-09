@@ -16,7 +16,7 @@
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-> **Early development — runnable core.** The gateway, the `qing` CLI, per-instance model routing and the Claude Code launcher are implemented and reproducible from this repository with `uv` (see [Try the development slice](#can-i-try-it)). There is no published package, registry release, or clean-install path yet. Real-provider evidence covers exactly the two tested configurations noted below (MiniMax M3 and glm-5.3-flash) — no other provider, endpoint or model has been verified; the first-release items below (configuration preview/backup/restore, published installs) are still being built.
+> **Early development — runnable core.** The gateway, the `qing` CLI, per-instance model routing, the Claude Code launcher and the `qing config import-claude` flow (settings import with a local private credential store) are implemented and reproducible from this repository with `uv` (see [Try the development slice](#can-i-try-it)). There is no published package, registry release, or clean-install path yet. Real-provider evidence covers exactly the two tested configurations noted below (MiniMax M3 and glm-5.3-flash) — no other provider, endpoint or model has been verified, and the import flow itself is verified against synthetic local fixtures only; the first-release items below (published installs) are still being built.
 
 ## Your next model shouldn't need another config file
 
@@ -30,7 +30,7 @@ Your agent stays where you work. Qingniao keeps the connections in order.
 
 The first release will be operated through `qing` in the terminal. Clear layouts, readable status feedback, and useful errors are part of the [planned terminal experience](docs/terminal-experience.md). A web GUI may follow based on actual usage.
 
-**Connect once.** Use `qing` to add your providers and models, check the connection, and connect Claude Code with a settings preview and a way to restore the original configuration.
+**Connect once.** Import your existing Claude settings with `qing config import-claude` — a desensitized preview first, then one explicit apply that stores the credential in a local private store (plain 0600 files, not an encrypted vault) and never touches your original file. Or add providers and models by hand with `qing config apply`.
 
 **Switch without the setup ritual.** Share provider and credential configuration across your Claude Code instances while choosing models independently in each one. Use `qing` to change a route for a specific instance without changing other instances. After the gateway confirms the update, new requests from that instance use the new route without a restart; requests already in progress keep their original destination. Default changes apply only to new instances.
 
@@ -60,13 +60,18 @@ Qingniao's longer-term role is to offer shared credentials, routing, and request
 
 ```
 uv sync --locked --extra dev
-export MY_PROVIDER_TOKEN=...        # credential env your config references; never stored in it
+uv run qing config import-claude            # preview importing ~/.claude/settings.json (zero writes)
+uv run qing config import-claude --apply    # save the connection + private credential, source untouched
 uv run qing serve &                 # loopback gateway (control token in its state dir)
-uv run qing config apply my-config.json
 uv run qing run --label work        # registers an instance and launches Claude Code
 uv run qing instances               # routes, revisions, per-instance state
 uv run qing requests                # sanitized per-request metadata (usage unknown vs real 0)
 ```
+
+Alternatively skip the import and reference exported variables (`export
+MY_PROVIDER_TOKEN=...` before `qing serve`; the value is never stored in
+the configuration). `qing run --preview` shows what attaching would do
+without registering anything.
 
 Credentials must be exported in the gateway's shell **before** `qing serve`; exporting later in another shell does not affect a running gateway. `qing run` gives every launch (including `--resume`) a fresh instance identity, injects the transport through a temporary 0600 settings file (never in argv), preserves your Claude settings, history and tools, and reports honestly: registered vs. started vs. first gateway-observed request. See [docs/development.md](docs/development.md) and [docs/api.md](docs/api.md).
 
