@@ -122,6 +122,157 @@ def test_persisted_file_is_0600(tmp_path):
     assert mode == 0o600
 
 
+def _v1_config(**extra: object) -> dict:
+    data: dict = {"schema_version": 1, "generation": 1}
+    data.update(base_config())
+    data.update(extra)
+    return data
+
+
+def _private_v1_config() -> dict:
+    data = _v1_config()
+    provider = data["providers"]["prov-p"]
+    del provider["credential_env"]
+    provider["credential_id"] = "cred_" + "0" * 32
+    return data
+
+
+def problems_for_dict(data: dict) -> list[str]:
+    with pytest.raises(Exception) as excinfo:
+        validate_config(data)
+    assert isinstance(excinfo.value, ApiError) or hasattr(excinfo.value, "problems")
+    if hasattr(excinfo.value, "problems"):
+        return [f"{p}: {m}" for p, m in excinfo.value.problems]
+    return [excinfo.value.message]
+
+
+def test_legacy_file_loads_read_only_with_zero_writes(tmp_path):
+    path = tmp_path / "config.json"
+    legacy_text = json.dumps(base_config(), indent=2) + "\n"
+    path.write_text(legacy_text, encoding="utf-8")
+    store = ConfigStore(path)
+    config = store.load()
+    assert config.providers["prov-p"].credential_env == "QING_TEST_P"
+    assert config.providers["prov-p"].credential_id is None
+    assert config.generation == 0
+    assert config.last_operation is None
+    assert path.read_text(encoding="utf-8") == legacy_text
+
+
+def test_legacy_apply_upgrades_to_v1_starting_at_generation_1(tmp_path):
+    path = tmp_path / "config.json"
+    store = ConfigStore(path)
+    config = store.apply(base_config())
+    persisted = json.loads(path.read_text())
+    assert persisted["schema_version"] == 1
+    assert persisted["generation"] == 1
+    assert persisted["last_operation"] is None
+    assert persisted["providers"]["prov-p"]["credential_env"] == "QING_TEST_P"
+    assert config.generation == 1
+    store.apply(base_config())
+    assert json.loads(path.read_text())["generation"] == 2
+
+
+def test_v1_config_round_trips_through_validate_and_load(tmp_path):
+    path = tmp_path / "config.json"
+    store = ConfigStore(path)
+    store.apply(_private_v1_config())
+    persisted = json.loads(path.read_text())
+    assert persisted["providers"]["prov-p"]["credential_id"] == "cred_" + "0" * 32
+    assert "credential_env" not in persisted["providers"]["prov-p"]
+    loaded = store.load()
+    assert loaded.providers["prov-p"].credential_id == "cred_" + "0" * 32
+    assert loaded.providers["prov-p"].credential_env is None
+    assert loaded.generation == 1
+
+
+def test_v1_provider_requires_exactly_one_credential_source():
+    both = _v1_config()
+    both["providers"]["prov-p"]["credential_id"] = "cred_" + "0" * 32
+    msgs = problems_for_dict(both)
+    assert any("exactly one of credential_env or credential_id" in m for m in msgs)
+    neither = _private_v1_config()
+    del neither["providers"]["prov-p"]["credential_id"]
+    msgs = problems_for_dict(neither)
+    assert any("exactly one of credential_env or credential_id" in m for m in msgs)
+
+
+def test_v1_credential_id_rejects_traversal_and_bad_format():
+    for bad in ("../secrets", "cred_short", "cred_" + "0" * 31, "cred_" + "G" * 32, 7):
+        data = _private_v1_config()
+        data["providers"]["prov-p"]["credential_id"] = bad
+        msgs = problems_for_dict(data)
+        assert any("credential_id" in m for m in msgs), bad
+
+
+def test_v1_generation_required_positive_integer():
+    data = _v1_config()
+    del data["generation"]
+    msgs = problems_for_dict(data)
+    assert any("generation" in m for m in msgs)
+    for bad in (0, -1, "3", 1.5, True):
+        data = _v1_config()
+        data["generation"] = bad
+        msgs = problems_for_dict(data)
+        assert any("generation" in m for m in msgs), bad
+
+
+def test_v1_last_operation_charset_restricted():
+    data = _v1_config()
+    data["last_operation"] = "op_" + "1" * 32
+    assert validate_config(data).last_operation == "op_" + "1" * 32
+    data["last_operation"] = None
+    assert validate_config(data).last_operation is None
+    for bad in ("not-an-op", "op_../x", "op_" + "Z" * 32, 5):
+        data = _v1_config()
+        data["last_operation"] = bad
+        msgs = problems_for_dict(data)
+        assert any("last_operation" in m for m in msgs), bad
+
+
+def test_legacy_config_cannot_carry_v1_fields():
+    data = base_config()
+    data["generation"] = 1
+    msgs = problems_for_dict(data)
+    assert any("unknown top-level" in m for m in msgs)
+
+
+def test_unknown_future_schema_version_rejected_without_overwrite(tmp_path):
+    path = tmp_path / "config.json"
+    data = _v1_config()
+    data["schema_version"] = 99
+    future_text = json.dumps(data, indent=2) + "\n"
+    path.write_text(future_text, encoding="utf-8")
+    with pytest.raises(ApiError) as excinfo:
+        ConfigStore(path).load()
+    assert excinfo.value.code == "config_load_failed"
+    assert any("schema version" in e["message"] for e in excinfo.value.details["errors_"])
+    assert path.read_text(encoding="utf-8") == future_text
+    with pytest.raises(Exception) as direct:
+        validate_config(data)
+    assert hasattr(direct.value, "problems")
+
+
+def test_schema_version_must_be_plain_integer():
+    for bad in ("1", 1.5, True):
+        data = _v1_config()
+        data["schema_version"] = bad
+        msgs = problems_for_dict(data)
+        assert any("schema_version" in m for m in msgs), bad
+
+
+def test_apply_preserves_last_operation_and_increments_generation(tmp_path):
+    path = tmp_path / "config.json"
+    store = ConfigStore(path)
+    store.apply(base_config())
+    data = json.loads(path.read_text())
+    data["last_operation"] = "op_" + "2" * 32
+    store.apply(data)
+    persisted = json.loads(path.read_text())
+    assert persisted["last_operation"] == "op_" + "2" * 32
+    assert persisted["generation"] == 2
+
+
 def test_apply_persist_failure_returns_stable_api_error(tmp_path, monkeypatch):
     import os
 
