@@ -79,6 +79,54 @@ def structured_cli_errors(json_output: bool):
         raise typer.Exit(code=1) from exc
 
 
+@contextlib.contextmanager
+def structured_catalog_errors(json_output: bool):
+    """Entry-level catalog commands share the human/agent error contract.
+
+    Usage errors (invalid arguments: bad values, mutually exclusive or
+    missing sources) exit 2 in both modes with the stable
+    ``invalid_argument`` code and structured ``errors[]`` detail;
+    expected failures keep exit 1 with their own stable code.
+    Parser-level missing options stay click errors (exit 2, ``cli_error``)
+    handled by ``main()``.
+    """
+    try:
+        yield
+    except typer.BadParameter as exc:
+        # Defensive: any remaining function-raised usage error stays a usage
+        # error (exit 2) with the invalid_argument code.
+        if not json_output:
+            raise
+        _print_json(
+            {
+                "ok": False,
+                "error": {
+                    "code": "invalid_argument",
+                    "message": str(exc),
+                    "errors": [{"path": "arguments", "message": str(exc)}],
+                },
+            }
+        )
+        raise typer.Exit(code=2) from exc
+    except CliError as exc:
+        if exc.code == errors.INVALID_ARGUMENT:
+            # Invalid user-supplied arguments are usage errors: exit 2 in
+            # every mode (human mode keeps click's usage rendering).
+            if not json_output:
+                raise typer.BadParameter(exc.message) from exc
+            error: dict = {"code": exc.code, "message": exc.message}
+            error.update(exc.details)
+            _print_json({"ok": False, "error": error})
+            raise typer.Exit(code=2) from exc
+        if not json_output:
+            stderr.print(f"error: {exc.message}")
+        else:
+            error = {"code": exc.code, "message": exc.message}
+            error.update(exc.details)
+            _print_json({"ok": False, "error": error})
+        raise typer.Exit(code=1) from exc
+
+
 def _state_dir(state_dir: Optional[Path]) -> Path:
     return Path(state_dir) if state_dir is not None else state_mod.default_state_dir()
 
@@ -338,12 +386,26 @@ def _require_credential_option(env_opt: object, id_opt: object, *, required: boo
         if value is not None
     ]
     if len(given) > 1:
-        raise typer.BadParameter(
-            "only one of --credential-env or --credential-id may be given; they are mutually exclusive"
+        raise CliError(
+            errors.INVALID_ARGUMENT,
+            "only one of --credential-env or --credential-id may be given; they are mutually exclusive",
+            errors=[
+                {
+                    "path": "--credential-env, --credential-id",
+                    "message": "mutually exclusive options; give exactly one",
+                }
+            ],
         )
     if required and not given:
-        raise typer.BadParameter(
-            "missing required option: exactly one of --credential-env or --credential-id is required"
+        raise CliError(
+            errors.INVALID_ARGUMENT,
+            "missing required option: exactly one of --credential-env or --credential-id is required",
+            errors=[
+                {
+                    "path": "--credential-env, --credential-id",
+                    "message": "exactly one credential source is required",
+                }
+            ],
         )
 
 
@@ -385,11 +447,18 @@ def provider_add(
     was verified."""
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         _require_credential_option(credential_env, credential_id, required=True)
         if auth not in cat.AUTH_MODES:
             raise CliError(
-                errors.INVALID_ARGUMENT, f"--auth must be one of: {', '.join(cat.AUTH_MODES)}"
+                errors.INVALID_ARGUMENT,
+                f"--auth must be one of: {', '.join(cat.AUTH_MODES)}",
+                errors=[
+                    {
+                        "path": "--auth",
+                        "message": f"must be one of: {', '.join(cat.AUTH_MODES)}",
+                    }
+                ],
             )
         config, generation = _get_config(state_dir)
         if pid in config.get("providers", {}):
@@ -446,7 +515,7 @@ def provider_list(
     """List provider entries (metadata only)."""
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         config, _ = _get_config(state_dir)
         entries = cat.list_providers(config)
         if json_output:
@@ -472,7 +541,7 @@ def provider_show(
     """Show one provider entry (metadata only)."""
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         config, _ = _get_config(state_dir)
         entry = cat.provider_view(config, pid)
         if entry is None:
@@ -501,16 +570,29 @@ def provider_set(
     entry_not_found and is never created implicitly."""
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         if base_url is None and auth is None and credential_env is None and credential_id is None:
             raise CliError(
                 errors.INVALID_ARGUMENT,
                 "nothing to change; specify at least one of --base-url, --auth, --credential-env or --credential-id",
+                errors=[
+                    {
+                        "path": "options",
+                        "message": "at least one of --base-url, --auth, --credential-env or --credential-id is required",
+                    }
+                ],
             )
         _require_credential_option(credential_env, credential_id, required=False)
         if auth is not None and auth not in cat.AUTH_MODES:
             raise CliError(
-                errors.INVALID_ARGUMENT, f"--auth must be one of: {', '.join(cat.AUTH_MODES)}"
+                errors.INVALID_ARGUMENT,
+                f"--auth must be one of: {', '.join(cat.AUTH_MODES)}",
+                errors=[
+                    {
+                        "path": "--auth",
+                        "message": f"must be one of: {', '.join(cat.AUTH_MODES)}",
+                    }
+                ],
             )
         config, generation = _get_config(state_dir)
         providers = config.get("providers", {})
@@ -586,7 +668,7 @@ def provider_rm(
     model references it (no cascade, no silent rewrite)."""
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         config, generation = _get_config(state_dir)
         if pid not in config.get("providers", {}):
             raise CliError(
@@ -629,7 +711,7 @@ def credential_list(
     """List credential catalog entries (metadata only; never values)."""
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         config, _ = _get_config(state_dir)
         entries = cat.list_credentials(config)
         if json_output:
@@ -661,7 +743,7 @@ def credential_show(
     """Show one credential catalog entry (metadata only; never the value)."""
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         config, _ = _get_config(state_dir)
         entry = cat.credential_view(config, cid)
         if entry is None:
@@ -698,7 +780,7 @@ def credential_add(
 
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         source_count = sum(
             (
                 env_name is not None,
@@ -707,14 +789,27 @@ def credential_add(
             )
         )
         if source_count != 1:
-            raise typer.BadParameter(
-                "exactly one credential source is required: --env NAME, --from-stdin or --from-file PATH"
+            raise CliError(
+                errors.INVALID_ARGUMENT,
+                "exactly one credential source is required: --env NAME, --from-stdin or --from-file PATH",
+                errors=[
+                    {
+                        "path": "credential source",
+                        "message": "exactly one of --env, --from-stdin or --from-file is required",
+                    }
+                ],
             )
         if from_stdin or from_file is not None:
             if cid is not None:
                 raise CliError(
                     errors.INVALID_ARGUMENT,
                     "private credential ids are generated by the gateway; do not pass an id with --from-stdin or --from-file",
+                    errors=[
+                        {
+                            "path": "credential id",
+                            "message": "ids are generated by the gateway for private credentials",
+                        }
+                    ],
                 )
             if dry_run:
                 config, generation = _get_config(state_dir)
@@ -742,10 +837,17 @@ def credential_add(
                 raise CliError(
                     errors.INVALID_ARGUMENT,
                     f"cannot read the credential value: {exc}",
+                    errors=[{"path": "--from-file", "message": f"cannot read: {exc}"}],
                 ) from exc
             secret = value.rstrip("\r\n")
             if not secret:
-                raise CliError(errors.INVALID_ARGUMENT, "the credential value is empty")
+                raise CliError(
+                    errors.INVALID_ARGUMENT,
+                    "the credential value is empty",
+                    errors=[
+                        {"path": "credential value", "message": "must be a non-empty value"}
+                    ],
+                )
             config, generation = _get_config(state_dir)
             result = _submit_private_credential(state_dir, config, generation, secret)
             status = result.get("status")
@@ -789,11 +891,26 @@ def credential_add(
         # --env: a named environment-variable credential source.
         assert env_name is not None
         if cid is None:
-            raise typer.BadParameter("a credential id is required with --env NAME")
+            raise CliError(
+                errors.INVALID_ARGUMENT,
+                "a credential id is required with --env NAME",
+                errors=[
+                    {
+                        "path": "credential id",
+                        "message": "required when the credential source is --env",
+                    }
+                ],
+            )
         if _re.match(r"\Acred_[0-9a-f]{32}\Z", cid):
             raise CliError(
                 errors.INVALID_ARGUMENT,
                 "cred_<hex> ids are reserved for private credentials; choose a plain id for an env-sourced credential",
+                errors=[
+                    {
+                        "path": "credential id",
+                        "message": "cred_<hex> ids are reserved for private credentials",
+                    }
+                ],
             )
         config, generation = _get_config(state_dir)
         if cid in config.get("credentials", {}):
@@ -806,7 +923,7 @@ def credential_add(
                 errors.ENTRY_EXISTS,
                 f"credential {cid!r} is already referenced by a provider; remove that reference first or use 'qing credential show {cid}'",
             )
-        config["credentials"][cid] = {"source": "env", "env": env_name}
+        config.setdefault("credentials", {})[cid] = {"source": "env", "env": env_name}
         _local_validate(config, "the credential catalog edit")
         changes = {
             "action": "add env credential",
@@ -853,7 +970,7 @@ def credential_rm(
     store versions are immutable and are never deleted by this command."""
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         config, generation = _get_config(state_dir)
         entry = cat.credential_view(config, cid)
         if entry is None:
@@ -871,7 +988,7 @@ def credential_rm(
                 f"credential {cid!r} is a private store version owned by an import; it cannot be removed with this command",
                 references=references,
             )
-        del config["credentials"][cid]
+        config.get("credentials", {}).pop(cid, None)
         _local_validate(config, "the credential catalog edit")
         changes = {
             "action": "remove credential",
@@ -910,7 +1027,7 @@ def model_add(
     an unknown provider fails with entry_not_found."""
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         config, generation = _get_config(state_dir)
         if mid in config.get("models", {}):
             raise CliError(
@@ -955,7 +1072,7 @@ def model_list(
     """List model entries."""
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         config, _ = _get_config(state_dir)
         entries = cat.list_models(config)
         if json_output:
@@ -980,7 +1097,7 @@ def model_show(
     """Show one model entry."""
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         config, _ = _get_config(state_dir)
         entry = cat.model_view(config, mid)
         if entry is None:
@@ -1006,11 +1123,17 @@ def model_set(
     and is never created implicitly."""
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         if provider is None and upstream_model is None:
             raise CliError(
                 errors.INVALID_ARGUMENT,
                 "nothing to change; specify at least one of --provider or --upstream-model",
+                errors=[
+                    {
+                        "path": "options",
+                        "message": "at least one of --provider or --upstream-model is required",
+                    }
+                ],
             )
         config, generation = _get_config(state_dir)
         models = config.get("models", {})
@@ -1071,7 +1194,7 @@ def model_rm(
     defaults or a route reference it (no cascade, no silent rewrite)."""
     from . import catalog as cat
 
-    with structured_cli_errors(json_output):
+    with structured_catalog_errors(json_output):
         config, generation = _get_config(state_dir)
         if mid not in config.get("models", {}):
             raise CliError(
