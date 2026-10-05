@@ -32,7 +32,8 @@ packages = ["src/qingniao"]
 # The sdist carries only public code and documentation: the package, the
 # public docs, the examples, the licensing and contribution files. Tests,
 # experiments and everything personal (agent skills, the private spec
-# workflow) are never packaged.
+# workflow) are never packaged. `exclude` complements `include` because
+# bare patterns like README.md match recursively.
 [tool.hatch.build.targets.sdist]
 include = [
   "src/qingniao",
@@ -43,6 +44,11 @@ include = [
   "LICENSE",
   "CONTRIBUTING.md",
   "pyproject.toml",
+]
+exclude = [
+  "tests",
+  "experiments",
+  "docs/assets/screenshots",
 ]
 
 [tool.pytest.ini_options]
