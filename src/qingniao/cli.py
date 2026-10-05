@@ -49,12 +49,14 @@ CLI_TIMEOUT = 15.0
 
 
 class CliError(Exception):
-    """CLI failure with a stable machine code and a human message."""
+    """CLI failure with a stable machine code, a human message and optional
+    structured details (never secret material)."""
 
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, **details):
         super().__init__(message)
         self.code = code
         self.message = message
+        self.details = details
 
 
 @contextlib.contextmanager
@@ -65,13 +67,15 @@ def structured_cli_errors(json_output: bool):
     except typer.BadParameter as exc:
         if not json_output:
             raise
-        _print_json({"error": {"code": "cli_error", "message": str(exc)}})
+        _print_json({"ok": False, "error": {"code": "cli_error", "message": str(exc)}})
         raise typer.Exit(code=1) from exc
     except CliError as exc:
         if not json_output:
             stderr.print(f"error: {exc.message}")
         else:
-            _print_json({"error": {"code": exc.code, "message": exc.message}})
+            error: dict = {"code": exc.code, "message": exc.message}
+            error.update(exc.details)
+            _print_json({"ok": False, "error": error})
         raise typer.Exit(code=1) from exc
 
 
@@ -153,6 +157,1011 @@ JsonFlag = typer.Option(False, "--json", help="machine-readable JSON output")
 StateDirOpt = typer.Option(None, "--state-dir", help="gateway state directory")
 
 
+# ------------------------------------------------------------ catalog CRUD
+#
+# Entry-level catalog management (providers, credentials, models) for
+# humans and agents alike: every command is non-interactive, accepts
+# --json with a stable structure, distinguishes failure by stable machine
+# codes and exit codes 0/1/2, and mutating commands preview the minimal
+# change with --dry-run before any write. All edits are read-modify-write
+# transactions through the running gateway (GET current config -> change
+# exactly one entry -> conditional PUT with expected_generation); there is
+# no offline write and no new control endpoint.
+
+provider_app = typer.Typer(
+    help=(
+        "Manage provider entries (add/list/show/set/rm) without rewriting "
+        "the whole configuration.\n\n"
+        "Examples:\n"
+        "  qing provider add my-provider --base-url https://api.example.com "
+        "--auth bearer --credential-env MY_TOKEN\n"
+        "  qing provider add p3 --base-url https://api.example.com "
+        "--auth x-api-key --credential-id shared-key\n"
+        "  qing provider rm my-provider\n"
+        "\n"
+        "All commands are non-interactive and accept --json; mutating "
+        "commands accept --dry-run. Changes are applied by the running "
+        "gateway and reported only when confirmed."
+    )
+)
+credential_app = typer.Typer(
+    help=(
+        "Manage named credential sources (list/show/add/rm) without "
+        "rewriting the whole configuration.\n\n"
+        "Examples:\n"
+        "  qing credential add shared-key --env MY_TOKEN\n"
+        "  qing credential add --from-file /path/to/token   # private store\n"
+        "  qing credential add --from-stdin                 # private store\n"
+        "  qing credential rm shared-key\n"
+        "\n"
+        "Credential values are only accepted on --from-stdin or --from-file "
+        "(never as command-line arguments) and never appear in output, "
+        "errors or logs. show/list return metadata only. All commands are "
+        "non-interactive and accept --json; mutating commands accept "
+        "--dry-run."
+    )
+)
+model_app = typer.Typer(
+    help=(
+        "Manage model entries (add/list/show/set/rm) without rewriting the "
+        "whole configuration.\n\n"
+        "Examples:\n"
+        "  qing model add my-model --provider my-provider "
+        "--upstream-model vendor/model\n"
+        "  qing model rm my-model\n"
+        "\n"
+        "All commands are non-interactive and accept --json; mutating "
+        "commands accept --dry-run. Changes are applied by the running "
+        "gateway and reported only when confirmed."
+    )
+)
+
+app.add_typer(provider_app, name="provider")
+app.add_typer(credential_app, name="credential")
+app.add_typer(model_app, name="model")
+
+
+def _check_cr(response: httpx.Response) -> dict:
+    """Like _check, but preserves the gateway's stable machine code and
+    details so catalog commands can surface them verbatim."""
+    if response.status_code >= 400:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"error": {"code": "http_error", "message": response.text[:200]}}
+        err = payload.get("error") if isinstance(payload, dict) else None
+        if not isinstance(err, dict):
+            err = {"code": "http_error", "message": str(payload)[:200]}
+        details = {k: v for k, v in err.items() if k not in ("code", "message")}
+        raise CliError(
+            err.get("code") or "http_error", err.get("message") or response.text[:200], **details
+        )
+    try:
+        return response.json()
+    except ValueError:
+        return {}
+
+
+def _get_config(state_dir: Optional[Path]) -> tuple[dict, int]:
+    payload = _check_cr(_call(state_dir, "GET", "/control/v1/config"))
+    config = payload.get("config")
+    generation = payload.get("generation")
+    if not isinstance(config, dict):
+        raise CliError(errors.INVALID_CONFIG, "the gateway returned a malformed configuration")
+    if isinstance(generation, bool) or not isinstance(generation, int):
+        raise CliError(errors.INVALID_CONFIG, "the gateway returned no readable generation")
+    return config, generation
+
+
+def _put_config(
+    state_dir: Optional[Path], config: dict, expected_generation: int, context: str
+) -> dict:
+    params = (
+        {"expected_generation": expected_generation}
+        if isinstance(expected_generation, int)
+        else {}
+    )
+    return _require_applied(
+        _check_cr(
+            _call(
+                state_dir,
+                "PUT",
+                "/control/v1/config",
+                params=params,
+                json=config,
+                unconfirmed_action=f"the {context}",
+            )
+        ),
+        context,
+    )
+
+
+def _local_validate(config: dict, context: str) -> None:
+    from .catalog import validate_edited_config
+
+    problems = validate_edited_config(config)
+    if problems:
+        raise CliError(
+            errors.INVALID_ARGUMENT,
+            f"{context} is invalid: {problems[0][0]}: {problems[0][1]}",
+            errors=[{"path": p, "message": m} for p, m in problems],
+        )
+
+
+def _render_ok(payload: dict) -> dict:
+    return {
+        "ok": True,
+        "applied": payload.get("applied") is True,
+        "revision": payload.get("revision"),
+        "generation": payload.get("generation"),
+    }
+
+
+def _catalog_commit(
+    state_dir: Optional[Path],
+    config: dict,
+    expected_generation: int,
+    context: str,
+    dry_run: bool,
+    json_output: bool,
+    changes: dict,
+) -> dict | None:
+    """Commit the edited config or print a zero-write dry-run preview.
+
+    Returns the applied payload (None after a dry-run preview). A dry run
+    only reads the current config; it never writes files and never calls a
+    change endpoint."""
+    if dry_run:
+        payload = {
+            "ok": True,
+            "dry_run": True,
+            "generation": expected_generation,
+            "changes": changes,
+        }
+        if json_output:
+            _print_json(payload)
+        else:
+            for line in changes.get("lines", []):
+                stdout.print(line, markup=False)
+            stdout.print(
+                "dry run: nothing was written and no change interface was called",
+                markup=False,
+            )
+        return None
+    return _put_config(state_dir, config, expected_generation, context)
+
+
+def _require_credential_option(env_opt: object, id_opt: object, *, required: bool) -> None:
+    given = [
+        name
+        for name, value in (("--credential-env", env_opt), ("--credential-id", id_opt))
+        if value is not None
+    ]
+    if len(given) > 1:
+        raise typer.BadParameter(
+            "only one of --credential-env or --credential-id may be given; they are mutually exclusive"
+        )
+    if required and not given:
+        raise typer.BadParameter(
+            "missing required option: exactly one of --credential-env or --credential-id is required"
+        )
+
+
+def _provider_entry(
+    *, base_url: str, auth: str, credential_env: str | None = None, credential_id: str | None = None
+) -> dict:
+    entry: dict = {"base_url": base_url, "auth": auth}
+    if credential_id is not None:
+        entry["credential_id"] = credential_id
+    elif credential_env is not None:
+        entry["credential_env"] = credential_env
+    return entry
+
+
+def _credential_display(config: dict, entry: dict) -> str:
+    from .catalog import credential_label
+
+    if entry.get("credential_env") is not None:
+        return f"env {entry['credential_env']}"
+    cid = entry.get("credential_id")
+    if cid is None:
+        return "(no credential)"
+    return credential_label(config, cid)
+
+
+@provider_app.command("add")
+def provider_add(
+    pid: str = typer.Argument(..., help="provider id"),
+    base_url: str = typer.Option(..., "--base-url", help="upstream base URL (http or https, no userinfo)"),
+    auth: str = typer.Option(..., "--auth", help="bearer | x-api-key"),
+    credential_env: Optional[str] = typer.Option(None, "--credential-env", help="environment variable holding the credential in the gateway process"),
+    credential_id: Optional[str] = typer.Option(None, "--credential-id", help="credential catalog id (registered with 'qing credential add') or a private cred_<hex> id"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="preview the minimal change without writing"),
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """Add one provider entry; a same-name entry fails with entry_exists.
+    Changes are applied by the running gateway and never mean a connection
+    was verified."""
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        _require_credential_option(credential_env, credential_id, required=True)
+        if auth not in cat.AUTH_MODES:
+            raise CliError(
+                errors.INVALID_ARGUMENT, f"--auth must be one of: {', '.join(cat.AUTH_MODES)}"
+            )
+        config, generation = _get_config(state_dir)
+        if pid in config.get("providers", {}):
+            raise CliError(
+                errors.ENTRY_EXISTS,
+                f"provider {pid!r} already exists; update it with 'qing provider set {pid}' instead",
+            )
+        if credential_id is not None and cat.resolve_credential_target(config, credential_id) is None:
+            raise CliError(
+                errors.ENTRY_NOT_FOUND,
+                f"unknown credential {credential_id!r}; register it with "
+                f"'qing credential add {credential_id} --env NAME' or reference an env variable "
+                "with --credential-env",
+            )
+        entry = _provider_entry(
+            base_url=base_url, auth=auth, credential_env=credential_env, credential_id=credential_id
+        )
+        config["providers"][pid] = entry
+        _local_validate(config, "the provider edit")
+        changes = {
+            "action": "add provider",
+            "id": pid,
+            "add": {"id": pid, **entry},
+            "lines": [
+                f"provider {pid}:",
+                "  action: add",
+                f"  base url: {entry['base_url']}",
+                f"  auth: {entry['auth']}",
+                f"  credential: {_credential_display(config, entry)}",
+            ],
+        }
+        payload = _catalog_commit(
+            state_dir, config, generation, "provider add", dry_run, json_output, changes
+        )
+        if payload is None:
+            return
+        if json_output:
+            _print_json({**_render_ok(payload), "provider": {"id": pid, **entry}})
+            return
+        stdout.print(
+            f"provider {pid} added (applied, config revision {payload.get('revision')})", markup=False
+        )
+        stdout.print(f"  base url: {entry['base_url']}", markup=False)
+        stdout.print(f"  auth: {entry['auth']}", markup=False)
+        stdout.print(f"  credential: {_credential_display(config, entry)}", markup=False)
+        stdout.print("saved or applied never means the connection was verified", markup=False)
+
+
+@provider_app.command("list")
+def provider_list(
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """List provider entries (metadata only)."""
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        config, _ = _get_config(state_dir)
+        entries = cat.list_providers(config)
+        if json_output:
+            _print_json({"ok": True, "providers": entries})
+            return
+        if not entries:
+            stdout.print("no providers configured", markup=False)
+            return
+        for entry in entries:
+            stdout.print(f"provider {entry['id']}", markup=False)
+            stdout.print(f"  base url: {entry.get('base_url')}", markup=False)
+            stdout.print(f"  auth: {entry.get('auth')}", markup=False)
+            stdout.print(f"  credential: {_credential_display(config, entry)}", markup=False)
+        stdout.print(f"total: {len(entries)}", markup=False)
+
+
+@provider_app.command("show")
+def provider_show(
+    pid: str = typer.Argument(..., help="provider id"),
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """Show one provider entry (metadata only)."""
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        config, _ = _get_config(state_dir)
+        entry = cat.provider_view(config, pid)
+        if entry is None:
+            raise CliError(errors.ENTRY_NOT_FOUND, f"no provider {pid!r} in the catalog")
+        if json_output:
+            _print_json({"ok": True, "provider": entry})
+            return
+        stdout.print(f"provider {pid}", markup=False)
+        stdout.print(f"  base url: {entry.get('base_url')}", markup=False)
+        stdout.print(f"  auth: {entry.get('auth')}", markup=False)
+        stdout.print(f"  credential: {_credential_display(config, entry)}", markup=False)
+
+
+@provider_app.command("set")
+def provider_set(
+    pid: str = typer.Argument(..., help="provider id"),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="upstream base URL"),
+    auth: Optional[str] = typer.Option(None, "--auth", help="bearer | x-api-key"),
+    credential_env: Optional[str] = typer.Option(None, "--credential-env", help="environment variable holding the credential"),
+    credential_id: Optional[str] = typer.Option(None, "--credential-id", help="credential catalog id or private cred_<hex> id"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="preview the minimal change without writing"),
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """Update one provider entry; a missing entry fails with
+    entry_not_found and is never created implicitly."""
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        if base_url is None and auth is None and credential_env is None and credential_id is None:
+            raise CliError(
+                errors.INVALID_ARGUMENT,
+                "nothing to change; specify at least one of --base-url, --auth, --credential-env or --credential-id",
+            )
+        _require_credential_option(credential_env, credential_id, required=False)
+        if auth is not None and auth not in cat.AUTH_MODES:
+            raise CliError(
+                errors.INVALID_ARGUMENT, f"--auth must be one of: {', '.join(cat.AUTH_MODES)}"
+            )
+        config, generation = _get_config(state_dir)
+        providers = config.get("providers", {})
+        if pid not in providers:
+            raise CliError(
+                errors.ENTRY_NOT_FOUND,
+                f"no provider {pid!r} in the catalog; add it with 'qing provider add {pid} ...'",
+            )
+        if credential_id is not None and cat.resolve_credential_target(config, credential_id) is None:
+            raise CliError(
+                errors.ENTRY_NOT_FOUND,
+                f"unknown credential {credential_id!r}; register it with "
+                f"'qing credential add {credential_id} --env NAME'",
+            )
+        current = dict(providers[pid])
+        entry = dict(current)
+        if base_url is not None:
+            entry["base_url"] = base_url
+        if auth is not None:
+            entry["auth"] = auth
+        if credential_env is not None:
+            entry.pop("credential_env", None)
+            entry.pop("credential_id", None)
+            entry["credential_env"] = credential_env
+        if credential_id is not None:
+            entry.pop("credential_env", None)
+            entry.pop("credential_id", None)
+            entry["credential_id"] = credential_id
+        config["providers"][pid] = entry
+        _local_validate(config, "the provider edit")
+        if entry == current:
+            if json_output:
+                _print_json({"ok": True, "applied": False, "changed": False, "provider": {"id": pid, **entry}})
+            else:
+                stdout.print(f"provider {pid}: no changes (already as requested)", markup=False)
+            return
+        changes = {
+            "action": "set provider",
+            "id": pid,
+            "set": {"id": pid, **entry},
+            "lines": [
+                f"provider {pid}:",
+                "  action: set",
+                *[
+                    f"  {key}: {entry[key]}"
+                    for key in ("base_url", "auth", "credential_env", "credential_id")
+                    if key in entry
+                ],
+            ],
+        }
+        payload = _catalog_commit(
+            state_dir, config, generation, "provider update", dry_run, json_output, changes
+        )
+        if payload is None:
+            return
+        if json_output:
+            _print_json({**_render_ok(payload), "provider": {"id": pid, **entry}})
+            return
+        stdout.print(
+            f"provider {pid} updated (applied, config revision {payload.get('revision')})", markup=False
+        )
+        stdout.print("saved or applied never means the connection was verified", markup=False)
+
+
+@provider_app.command("rm")
+def provider_rm(
+    pid: str = typer.Argument(..., help="provider id"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="preview the minimal change without writing"),
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """Remove one provider entry; removal fails with entry_in_use when a
+    model references it (no cascade, no silent rewrite)."""
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        config, generation = _get_config(state_dir)
+        if pid not in config.get("providers", {}):
+            raise CliError(
+                errors.ENTRY_NOT_FOUND,
+                f"no provider {pid!r} in the catalog",
+            )
+        references = cat.provider_referenced_by_models(config, pid)
+        if references:
+            raise CliError(
+                errors.ENTRY_IN_USE,
+                f"provider {pid!r} is referenced by model(s): {', '.join(references)}",
+                references=references,
+            )
+        del config["providers"][pid]
+        _local_validate(config, "the provider edit")
+        changes = {
+            "action": "remove provider",
+            "id": pid,
+            "remove": pid,
+            "lines": [f"provider {pid}:", "  action: remove"],
+        }
+        payload = _catalog_commit(
+            state_dir, config, generation, "provider removal", dry_run, json_output, changes
+        )
+        if payload is None:
+            return
+        if json_output:
+            _print_json({**_render_ok(payload), "removed": pid})
+            return
+        stdout.print(
+            f"provider {pid} removed (applied, config revision {payload.get('revision')})", markup=False
+        )
+
+
+@credential_app.command("list")
+def credential_list(
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """List credential catalog entries (metadata only; never values)."""
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        config, _ = _get_config(state_dir)
+        entries = cat.list_credentials(config)
+        if json_output:
+            _print_json({"ok": True, "credentials": entries})
+            return
+        if not entries:
+            stdout.print("no credentials in the catalog", markup=False)
+            return
+        for entry in entries:
+            source = entry.get("source")
+            if source == "env":
+                source_text = f"env {entry.get('env')}"
+            else:
+                source_text = "private"
+            stdout.print(f"credential {entry['id']}", markup=False)
+            stdout.print(f"  source: {source_text}", markup=False)
+            refs = entry.get("referenced_by") or []
+            if refs:
+                stdout.print(f"  referenced by: {', '.join(refs)}", markup=False)
+        stdout.print(f"total: {len(entries)}", markup=False)
+
+
+@credential_app.command("show")
+def credential_show(
+    cid: str = typer.Argument(..., help="credential id"),
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """Show one credential catalog entry (metadata only; never the value)."""
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        config, _ = _get_config(state_dir)
+        entry = cat.credential_view(config, cid)
+        if entry is None:
+            raise CliError(errors.ENTRY_NOT_FOUND, f"no credential {cid!r} in the catalog")
+        if json_output:
+            _print_json({"ok": True, "credential": entry})
+            return
+        source = entry.get("source")
+        source_text = f"env {entry.get('env')}" if source == "env" else "private"
+        stdout.print(f"credential {cid}", markup=False)
+        stdout.print(f"  source: {source_text}", markup=False)
+        refs = entry.get("referenced_by") or []
+        if refs:
+            stdout.print(f"  referenced by: {', '.join(refs)}", markup=False)
+
+
+@credential_app.command("add")
+def credential_add(
+    cid: Optional[str] = typer.Argument(
+        None,
+        help="credential id (required for --env; generated by the gateway for private credentials)",
+    ),
+    env_name: Optional[str] = typer.Option(None, "--env", help="environment variable holding the credential value"),
+    from_stdin: bool = typer.Option(False, "--from-stdin", help="read the credential value from standard input"),
+    from_file: Optional[Path] = typer.Option(None, "--from-file", help="read the credential value from a file"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="preview the minimal change without writing"),
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """Register a credential source. Values only enter through --env, stdio
+    or a file — never as command-line arguments — and never appear in
+    output, errors or logs. A same-name entry fails with entry_exists."""
+    import re as _re
+
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        source_count = sum(
+            (
+                env_name is not None,
+                from_stdin,
+                from_file is not None,
+            )
+        )
+        if source_count != 1:
+            raise typer.BadParameter(
+                "exactly one credential source is required: --env NAME, --from-stdin or --from-file PATH"
+            )
+        if from_stdin or from_file is not None:
+            if cid is not None:
+                raise CliError(
+                    errors.INVALID_ARGUMENT,
+                    "private credential ids are generated by the gateway; do not pass an id with --from-stdin or --from-file",
+                )
+            if dry_run:
+                config, generation = _get_config(state_dir)
+                changes = {
+                    "action": "add private credential",
+                    "id": None,
+                    "lines": [
+                        "credential (private):",
+                        "  action: add",
+                        "  source: read from " + (str(from_file) if from_file is not None else "standard input"),
+                        "  the gateway generates the immutable cred_<hex> id",
+                        "  the value is committed only into the private store (0600), never into the configuration or any output",
+                    ],
+                }
+                _catalog_commit(
+                    state_dir, config, generation, "credential store", dry_run, json_output, changes
+                )
+                return
+            try:
+                if from_file is not None:
+                    value = from_file.read_text(encoding="utf-8")
+                else:
+                    value = sys.stdin.read()
+            except OSError as exc:
+                raise CliError(
+                    errors.INVALID_ARGUMENT,
+                    f"cannot read the credential value: {exc}",
+                ) from exc
+            secret = value.rstrip("\r\n")
+            if not secret:
+                raise CliError(errors.INVALID_ARGUMENT, "the credential value is empty")
+            config, generation = _get_config(state_dir)
+            result = _submit_private_credential(state_dir, config, generation, secret)
+            status = result.get("status")
+            if status == "unconfirmed":
+                if json_output:
+                    _print_json(
+                        {
+                            "ok": True,
+                            "status": "unconfirmed",
+                            "operation_id": result.get("operation_id"),
+                            "message": result.get("message"),
+                        }
+                    )
+                else:
+                    stdout.print(result.get("message") or "effect unconfirmed", markup=False)
+                return
+            if status != "committed" or not result.get("applied"):
+                raise CliError(
+                    "unconfirmed",
+                    f"the gateway did not confirm the private credential store ({status}); the effect is unconfirmed — query the operation before retrying",
+                )
+            cred_id = result.get("credential_id")
+            if json_output:
+                _print_json(
+                    {
+                        "ok": True,
+                        "applied": True,
+                        "generation": result.get("generation"),
+                        "credential": {"id": cred_id, "source": "private", "referenced_by": []},
+                    }
+                )
+                return
+            stdout.print(f"private credential {cred_id} stored (applied by the running gateway)", markup=False)
+            stdout.print("the value never appears in the configuration, output or logs", markup=False)
+            stdout.print(
+                f"reference it with: qing provider add <id> --base-url ... --credential-id {cred_id}",
+                markup=False,
+            )
+            return
+
+        # --env: a named environment-variable credential source.
+        assert env_name is not None
+        if cid is None:
+            raise typer.BadParameter("a credential id is required with --env NAME")
+        if _re.match(r"\Acred_[0-9a-f]{32}\Z", cid):
+            raise CliError(
+                errors.INVALID_ARGUMENT,
+                "cred_<hex> ids are reserved for private credentials; choose a plain id for an env-sourced credential",
+            )
+        config, generation = _get_config(state_dir)
+        if cid in config.get("credentials", {}):
+            raise CliError(
+                errors.ENTRY_EXISTS,
+                f"credential {cid!r} already exists; update the provider reference or remove it with 'qing credential rm {cid}'",
+            )
+        if cat.credential_referenced_by(config, cid):
+            raise CliError(
+                errors.ENTRY_EXISTS,
+                f"credential {cid!r} is already referenced by a provider; remove that reference first or use 'qing credential show {cid}'",
+            )
+        config["credentials"][cid] = {"source": "env", "env": env_name}
+        _local_validate(config, "the credential catalog edit")
+        changes = {
+            "action": "add env credential",
+            "id": cid,
+            "add": {"source": "env", "env": env_name},
+            "lines": [
+                f"credential {cid}:",
+                "  action: add",
+                f"  source: env {env_name}",
+            ],
+        }
+        payload = _catalog_commit(
+            state_dir, config, generation, "credential catalog add", dry_run, json_output, changes
+        )
+        if payload is None:
+            return
+        if json_output:
+            _print_json(
+                {
+                    **_render_ok(payload),
+                    "credential": {"id": cid, "source": "env", "env": env_name, "referenced_by": []},
+                }
+            )
+            return
+        stdout.print(
+            f"credential {cid} added (env {env_name}, applied, config revision {payload.get('revision')})",
+            markup=False,
+        )
+        stdout.print(
+            f"reference it with: qing provider add <id> --base-url ... --credential-id {cid}",
+            markup=False,
+        )
+
+
+@credential_app.command("rm")
+def credential_rm(
+    cid: str = typer.Argument(..., help="credential id"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="preview the minimal change without writing"),
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """Remove a credential catalog entry; removal fails with entry_in_use
+    when a provider references it (no cascade, no silent rewrite). Private
+    store versions are immutable and are never deleted by this command."""
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        config, generation = _get_config(state_dir)
+        entry = cat.credential_view(config, cid)
+        if entry is None:
+            raise CliError(errors.ENTRY_NOT_FOUND, f"no credential {cid!r} in the catalog")
+        references = entry.get("referenced_by") or []
+        if references:
+            raise CliError(
+                errors.ENTRY_IN_USE,
+                f"credential {cid!r} is referenced by provider(s): {', '.join(references)}",
+                references=references,
+            )
+        if entry.get("derived"):
+            raise CliError(
+                errors.ENTRY_IN_USE,
+                f"credential {cid!r} is a private store version owned by an import; it cannot be removed with this command",
+                references=references,
+            )
+        del config["credentials"][cid]
+        _local_validate(config, "the credential catalog edit")
+        changes = {
+            "action": "remove credential",
+            "id": cid,
+            "remove": cid,
+            "lines": [f"credential {cid}:", "  action: remove"],
+        }
+        payload = _catalog_commit(
+            state_dir, config, generation, "credential catalog removal", dry_run, json_output, changes
+        )
+        if payload is None:
+            return
+        if json_output:
+            _print_json({**_render_ok(payload), "removed": cid})
+            return
+        stdout.print(
+            f"credential {cid} removed (applied, config revision {payload.get('revision')})", markup=False
+        )
+        if entry.get("source") == "private":
+            stdout.print(
+                "private store versions are immutable; the stored value is kept per the existing version rules",
+                markup=False,
+            )
+
+
+@model_app.command("add")
+def model_add(
+    mid: str = typer.Argument(..., help="model id"),
+    provider: str = typer.Option(..., "--provider", help="provider id that must already exist"),
+    upstream_model: str = typer.Option(..., "--upstream-model", help="exact upstream model string sent to the provider"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="preview the minimal change without writing"),
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """Add one model entry; a same-name entry fails with entry_exists and
+    an unknown provider fails with entry_not_found."""
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        config, generation = _get_config(state_dir)
+        if mid in config.get("models", {}):
+            raise CliError(
+                errors.ENTRY_EXISTS,
+                f"model {mid!r} already exists; update it with 'qing model set {mid}' instead",
+            )
+        if provider not in config.get("providers", {}):
+            raise CliError(
+                errors.ENTRY_NOT_FOUND,
+                f"provider {provider!r} does not exist; add it with 'qing provider add {provider} ...' first",
+            )
+        entry = {"provider": provider, "upstream_model": upstream_model}
+        config["models"][mid] = entry
+        _local_validate(config, "the model edit")
+        changes = {
+            "action": "add model",
+            "id": mid,
+            "add": {"id": mid, **entry},
+            "lines": [
+                f"model {mid}:",
+                "  action: add",
+                f"  provider: {provider}",
+                f"  upstream model: {upstream_model}",
+            ],
+        }
+        payload = _catalog_commit(state_dir, config, generation, "model add", dry_run, json_output, changes)
+        if payload is None:
+            return
+        if json_output:
+            _print_json({**_render_ok(payload), "model": {"id": mid, **entry}})
+            return
+        stdout.print(
+            f"model {mid} added (applied, config revision {payload.get('revision')})", markup=False
+        )
+
+
+@model_app.command("list")
+def model_list(
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """List model entries."""
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        config, _ = _get_config(state_dir)
+        entries = cat.list_models(config)
+        if json_output:
+            _print_json({"ok": True, "models": entries})
+            return
+        if not entries:
+            stdout.print("no models configured", markup=False)
+            return
+        for entry in entries:
+            stdout.print(f"model {entry['id']}", markup=False)
+            stdout.print(f"  provider: {entry.get('provider')}", markup=False)
+            stdout.print(f"  upstream model: {entry.get('upstream_model')}", markup=False)
+        stdout.print(f"total: {len(entries)}", markup=False)
+
+
+@model_app.command("show")
+def model_show(
+    mid: str = typer.Argument(..., help="model id"),
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """Show one model entry."""
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        config, _ = _get_config(state_dir)
+        entry = cat.model_view(config, mid)
+        if entry is None:
+            raise CliError(errors.ENTRY_NOT_FOUND, f"no model {mid!r} in the catalog")
+        if json_output:
+            _print_json({"ok": True, "model": entry})
+            return
+        stdout.print(f"model {mid}", markup=False)
+        stdout.print(f"  provider: {entry.get('provider')}", markup=False)
+        stdout.print(f"  upstream model: {entry.get('upstream_model')}", markup=False)
+
+
+@model_app.command("set")
+def model_set(
+    mid: str = typer.Argument(..., help="model id"),
+    provider: Optional[str] = typer.Option(None, "--provider", help="provider id that must already exist"),
+    upstream_model: Optional[str] = typer.Option(None, "--upstream-model", help="exact upstream model string"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="preview the minimal change without writing"),
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """Update one model entry; a missing entry fails with entry_not_found
+    and is never created implicitly."""
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        if provider is None and upstream_model is None:
+            raise CliError(
+                errors.INVALID_ARGUMENT,
+                "nothing to change; specify at least one of --provider or --upstream-model",
+            )
+        config, generation = _get_config(state_dir)
+        models = config.get("models", {})
+        if mid not in models:
+            raise CliError(
+                errors.ENTRY_NOT_FOUND,
+                f"no model {mid!r} in the catalog; add it with 'qing model add {mid} ...'",
+            )
+        if provider is not None and provider not in config.get("providers", {}):
+            raise CliError(
+                errors.ENTRY_NOT_FOUND,
+                f"provider {provider!r} does not exist; add it with 'qing provider add {provider} ...' first",
+            )
+        current = dict(models[mid])
+        entry = dict(current)
+        if provider is not None:
+            entry["provider"] = provider
+        if upstream_model is not None:
+            entry["upstream_model"] = upstream_model
+        config["models"][mid] = entry
+        _local_validate(config, "the model edit")
+        if entry == current:
+            if json_output:
+                _print_json({"ok": True, "applied": False, "changed": False, "model": {"id": mid, **entry}})
+            else:
+                stdout.print(f"model {mid}: no changes (already as requested)", markup=False)
+            return
+        changes = {
+            "action": "set model",
+            "id": mid,
+            "set": {"id": mid, **entry},
+            "lines": [
+                f"model {mid}:",
+                "  action: set",
+                f"  provider: {entry['provider']}",
+                f"  upstream model: {entry['upstream_model']}",
+            ],
+        }
+        payload = _catalog_commit(state_dir, config, generation, "model update", dry_run, json_output, changes)
+        if payload is None:
+            return
+        if json_output:
+            _print_json({**_render_ok(payload), "model": {"id": mid, **entry}})
+            return
+        stdout.print(
+            f"model {mid} updated (applied, config revision {payload.get('revision')})", markup=False
+        )
+
+
+@model_app.command("rm")
+def model_rm(
+    mid: str = typer.Argument(..., help="model id"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="preview the minimal change without writing"),
+    state_dir: Optional[Path] = StateDirOpt,
+    json_output: bool = JsonFlag,
+) -> None:
+    """Remove one model entry; removal fails with entry_in_use when the
+    defaults or a route reference it (no cascade, no silent rewrite)."""
+    from . import catalog as cat
+
+    with structured_cli_errors(json_output):
+        config, generation = _get_config(state_dir)
+        if mid not in config.get("models", {}):
+            raise CliError(
+                errors.ENTRY_NOT_FOUND,
+                f"no model {mid!r} in the catalog",
+            )
+        references = cat.model_referenced_by(config, mid)
+        if references:
+            raise CliError(
+                errors.ENTRY_IN_USE,
+                f"model {mid!r} is referenced by: {', '.join(references)}",
+                references=references,
+            )
+        del config["models"][mid]
+        _local_validate(config, "the model edit")
+        changes = {
+            "action": "remove model",
+            "id": mid,
+            "remove": mid,
+            "lines": [f"model {mid}:", "  action: remove"],
+        }
+        payload = _catalog_commit(state_dir, config, generation, "model removal", dry_run, json_output, changes)
+        if payload is None:
+            return
+        if json_output:
+            _print_json({**_render_ok(payload), "removed": mid})
+            return
+        stdout.print(
+            f"model {mid} removed (applied, config revision {payload.get('revision')})", markup=False
+        )
+
+
+def _submit_private_credential(
+    state_dir: Optional[Path], config: dict, generation: int, secret: str
+) -> dict:
+    """Store a private credential through the authenticated gateway.
+
+    Reuses the existing single-transaction import channel (the only path
+    that may carry a secret over the authenticated control channel); the
+    plan is credential-only and commits the private store version plus its
+    catalog entry atomically. No offline write, no new endpoint.
+    """
+    from .importing import ImportPlan, plan_to_wire
+    from .tokens import new_operation_id
+
+    plan = ImportPlan(
+        operation_id=new_operation_id(),
+        source=Path("<private-credential>"),
+        source_digest="0" * 64,
+        expected_generation=generation,
+        status="apply",
+        secret=secret,
+    )
+    try:
+        response = _call(
+            state_dir,
+            "POST",
+            "/control/v1/imports",
+            json={"operation_id": plan.operation_id, "plan": plan_to_wire(plan)},
+            timeout=30.0,
+            unconfirmed_action="the private credential store",
+        )
+    except CliError as exc:
+        if exc.code != "unconfirmed":
+            raise
+        try:
+            query = _check_cr(
+                _call(state_dir, "GET", f"/control/v1/operations/{plan.operation_id}")
+            )
+        except (CliError, typer.BadParameter):
+            query = {}
+        status = query.get("status")
+        if status in ("committed", "aborted"):
+            return {
+                "status": status,
+                "operation_id": plan.operation_id,
+                "generation": query.get("generation"),
+                "applied": status == "committed",
+                "recovered": True,
+                "credential_id": query.get("credential_id"),
+            }
+        return {
+            "status": "unconfirmed",
+            "operation_id": plan.operation_id,
+            "message": "the gateway did not confirm the private credential store in time; "
+            "check again with 'qing config operation " + plan.operation_id + "' before retrying",
+        }
+    return _check_cr(response)
+
+
 @app.command()
 def serve(
     state_dir: Optional[Path] = StateDirOpt,
@@ -178,12 +1187,22 @@ def config_show(
         if isinstance(payload.get("generation"), int):
             stdout.print(f"generation: {payload.get('generation')}")
         stdout.print("providers:")
+        from . import catalog as _cat
+
         for pid, p in config.get("providers", {}).items():
             if p.get("credential_env") is not None:
                 credential = f"credential env {p.get('credential_env')}"
             else:
-                credential = f"private credential {p.get('credential_id')}"
+                cid = p.get("credential_id")
+                credential = f"credential {_cat.credential_label(config, cid) if cid else '(none)'}"
             stdout.print(f"  {pid}: {p.get('base_url')} ({p.get('auth')}, {credential})", markup=False)
+        credentials = config.get("credentials", {})
+        if credentials:
+            stdout.print("credentials:")
+            for cid in sorted(credentials):
+                entry = credentials[cid]
+                source = f"env {entry['env']}" if entry.get("source") == "env" else "private"
+                stdout.print(f"  {cid}: {source}", markup=False)
         stdout.print("models:")
         for mid, m in config.get("models", {}).items():
             stdout.print(f"  {mid}: provider {m.get('provider')}, upstream model {m.get('upstream_model')}")
@@ -890,7 +1909,7 @@ def main() -> int:
                 flush=True,
             )
         else:
-            _print_json({"error": {"code": "cli_error", "message": message}})
+            _print_json({"ok": False, "error": {"code": "cli_error", "message": message}})
         return 2
     return int(code or 0)
 
