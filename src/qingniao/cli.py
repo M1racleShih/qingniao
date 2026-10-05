@@ -25,7 +25,47 @@ except ImportError:  # pragma: no cover
 from . import errors, state as state_mod
 from .serve import run_serve
 
-app = typer.Typer(add_completion=False, help="Qingniao gateway control")
+def _qing_version() -> str:
+    """Report the package version: installed package metadata when the
+    distribution is installed, otherwise the in-tree ``__version__``."""
+    try:
+        from importlib.metadata import version as _metadata_version
+
+        return _metadata_version("qingniao")
+    except Exception:
+        from . import __version__ as _version
+
+        return _version
+
+
+app = typer.Typer(
+    add_completion=False,
+    help="Qingniao gateway control",
+)
+
+
+def _version_callback(ctx: typer.Context, param: object, value: Optional[bool]) -> None:
+    if not value or ctx.resilient_parsing:
+        return
+    print(_qing_version())
+    raise typer.Exit()
+
+
+@app.callback()
+def _qing_main(
+    ctx: typer.Context,
+    version: Optional[bool] = typer.Option(
+        None,
+        "--version",
+        "-V",
+        help="Show the version and exit",
+        is_eager=True,
+        callback=_version_callback,
+    ),
+) -> None:
+    pass
+
+
 config_app = typer.Typer(help="Shared connection configuration")
 defaults_app = typer.Typer(help="Default model selection for new instances")
 instance_app = typer.Typer(help="Instance operations")

@@ -168,3 +168,30 @@ def test_run_native_json_after_separator_is_not_machine_mode(monkeypatch, capsys
     assert "event" not in err.splitlines()[-1]
     with pytest.raises(json.JSONDecodeError):
         json.loads(err.strip().splitlines()[-1])
+
+
+def test_version_option_reports_package_version(monkeypatch, capsys):
+    code = _run_cli_main(monkeypatch, ["--version"])
+    out, _ = capsys.readouterr()
+    assert code == 0
+    assert out.strip() == "0.1.0"
+    # short form works too
+    code = _run_cli_main(monkeypatch, ["-V"])
+    out, _ = capsys.readouterr()
+    assert code == 0
+    assert out.strip() == "0.1.0"
+
+
+def test_version_consistent_with_package_metadata():
+    from importlib.metadata import version as metadata_version
+
+    from qingniao import __version__
+
+    # release-readiness contract: the CLI, the package metadata and the
+    # release artifact must agree on the version
+    try:
+        installed = metadata_version("qingniao")
+    except Exception:
+        installed = None
+    if installed is not None:
+        assert installed == __version__ == "0.1.0"
