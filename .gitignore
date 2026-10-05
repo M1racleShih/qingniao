@@ -13,3 +13,4 @@ coverage/
 *.py[cod]
 .pytest_cache/
 *.egg-info/
+.vscode/
