@@ -4,7 +4,7 @@ against two authorized real upstreams.
 
 Authorized configurations (no others):
 - MiniMax M3  at https://api.minimaxi.com/anthropic   (env MINIMAX_API_KEY)
-- glm-5.3-flash at https://open.bigmodel.cn/api/anthropic (env ZAI_API_KEY_TEAM)
+- glm-5.3-flash at https://open.bigmodel.cn/api/anthropic (env Z_AI_API_KEY; personal GLM plan)
 
 Scenario (single loopback gateway, one shared catalog, same-cwd runs):
 1. Preflight: one minimal real message per provider to confirm the exact
@@ -107,7 +107,7 @@ BANKED_PREFLIGHT = {
     },
     "zai": {
         "base_url": "https://open.bigmodel.cn/api/anthropic",
-        "credential_env": "ZAI_API_KEY_TEAM",
+        "credential_env": "Z_AI_API_KEY",
         "model_id": "glm-5.3-flash",
         "auth_mode": "bearer",
         "status": 200,
@@ -154,7 +154,7 @@ def preflight() -> dict:
     with httpx.Client(timeout=90.0, trust_env=False) as client:
         for name, base, env_name, model in (
             ("minimax", MINIMAX_BASE, "MINIMAX_API_KEY", MINIMAX_MODEL),
-            ("zai", ZAI_BASE, "ZAI_API_KEY_TEAM", ZAI_MODEL),
+            ("zai", ZAI_BASE, "Z_AI_API_KEY", ZAI_MODEL),
         ):
             key = os.environ[env_name]
             entry: dict = {"base_url": base, "credential_env": env_name, "model_id": model}
@@ -287,7 +287,7 @@ class HoldServer(socketserver.ThreadingTCPServer):
 
 
 ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "SHELL", "USER")
-CREDENTIAL_ENVS = ("MINIMAX_API_KEY", "ZAI_API_KEY_TEAM")
+CREDENTIAL_ENVS = ("MINIMAX_API_KEY", "Z_AI_API_KEY")  # personal GLM plan; the team key is no longer authorized
 
 
 def serve_env(hold_port: int) -> dict:
@@ -674,7 +674,7 @@ def main() -> int:
         config = {
             "providers": {
                 "minimax": {"base_url": MINIMAX_BASE, "credential_env": "MINIMAX_API_KEY", "auth": "bearer"},
-                "zai": {"base_url": ZAI_BASE, "credential_env": "ZAI_API_KEY_TEAM", "auth": "bearer"},
+                "zai": {"base_url": ZAI_BASE, "credential_env": "Z_AI_API_KEY", "auth": "bearer"},
             },
             "models": {
                 "mini-m3": {"provider": "minimax", "upstream_model": MINIMAX_MODEL},

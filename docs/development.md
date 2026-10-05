@@ -63,8 +63,10 @@ Real import-path validation uses `experiments/real-provider-verification/run_imp
 (the same sanitization/budget guardrails as `run_validation.py`: exit 77
 without credentials, a real-request cap with counting before every request,
 no cross-provider retries, sanitized reports off-tree). See the README's
-verification section for the 2026-10-05 result: MiniMax M3 passed the full
-import path; zai-rate limiting blocked glm-5.3-flash within the budget.
+verification section for the 2026-10-05 result: both MiniMax M3 and
+glm-5.3-flash (personal GLM plan) passed the full import path, and a real
+Claude Code session ran through `qing run` on the glm-5.3-flash upstream
+(`run_wave4_validation.py`).
 
 ## Running the gateway locally
 
@@ -302,7 +304,11 @@ Real-provider validation (`experiments/real-provider-verification/run_validation
 | Provider endpoint | Exact model ID | Credential env | Auth header |
 | --- | --- | --- | --- |
 | `https://api.minimaxi.com/anthropic` | `MiniMax-M3` | `MINIMAX_API_KEY` | `Authorization: Bearer` |
-| `https://open.bigmodel.cn/api/anthropic` | `glm-5.3-flash` | `ZAI_API_KEY_TEAM` | `Authorization: Bearer` |
+| `https://open.bigmodel.cn/api/anthropic` | `glm-5.3-flash` | `Z_AI_API_KEY` | `Authorization: Bearer` |
+
+(The 2026-09-08 acceptance used the team-plan key `ZAI_API_KEY_TEAM` for
+the same endpoint and model; that key is no longer authorized — the
+harnesses now use the personal GLM key `Z_AI_API_KEY`.)
 
 Reproduce with both credentials exported in the gateway shell: `uv run --locked python experiments/real-provider-verification/run_validation.py`. The intended request budget is 30 provider message requests with at most 2 concurrent, checked **between scenario stages** — it is a budget guard, not a hard per-message guarantee; the final acceptance run observed 6 provider message requests, all documented attempts together observed 24, and observed concurrency was 1. The script exits 77 without credentials and writes a sanitized JSON report (ids, models, revisions, outcomes, usage numbers; never prompts, replies or credentials). Fresh reproductions start from a zero request ledger; the 2026-09-08 acceptance itself spent 24 message requests cumulatively across all documented attempts (6 in the final successful run), and resumed attempts can pass an explicit prior ledger via `QING_REAL_PRIOR_LEDGER`. This is evidence for exactly the two configurations above — it does not imply compatibility with any other provider, endpoint, or model.
 
@@ -311,13 +317,12 @@ Reproduce with both credentials exported in the gateway shell: `uv run --locked 
 - Real-provider evidence covers only the validated configurations;
   every other provider, endpoint and model is untested, and the loopback
   synthetic fixtures remain the regression baseline.
-- As of 2026-10-05 the real import path is validated end to end for
-  MiniMax M3 only; **glm-5.3-flash answered every preflight attempt with
-  429 rate_limit_error** within the acceptance window, so its full import
-  leg and the optional real-`claude` leg did not run (the real-request
-  budget of 10 was fully and honestly consumed; everything was counted
-  before firing). That is a recorded gap that must be closed before the
-  import path can be claimed for both authorized configurations. Reverse
+- As of 2026-10-05 the real import path is validated end to end for both
+  authorized configurations: MiniMax M3 and glm-5.3-flash on the personal
+  GLM plan, including a real Claude Code session through `qing run` on
+  glm-5.3-flash. The MiMo fallback leg (XIAOMI credentials) is wired into
+  the wave-4 harness but was not exercised because the primary
+  second-upstream leg already passed. Reverse
   proxy aliases that loop back to the gateway cannot be detected by the
   offline self-reference check.
 - A **public** published installation path does not exist yet: the clean
@@ -325,6 +330,7 @@ Reproduce with both credentials exported in the gateway shell: `uv run --locked 
   package name is now `qingniao-gateway` (PyPI `qingniao` is occupied) and
   publishing waits for an explicit maintainer authorization.
 - The launcher has been exercised against Claude Code 2.1.251 (2026-09-08
-  acceptance) and Claude Code 2.1.274 is present in this environment; a
-  fresh `qing run` acceptance run within this release slice was skipped
-  when the real-request budget ran out.
+  acceptance) and Claude Code **2.1.274**: a real `qing run` acceptance run
+  (single minimal print-mode turn) completed on the glm-5.3-flash upstream
+  within wave 4, routing a success record to the expected provider; only
+  that minimal session type is claimed.

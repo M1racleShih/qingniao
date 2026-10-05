@@ -16,7 +16,7 @@
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-> **Early development — runnable core, release path being assembled.** The gateway, the `qing` CLI, per-instance model routing, the Claude Code launcher and the `qing config import-claude` flow (settings import with a local private credential store) are implemented. The release **artifact** is buildable and installable (clean Linux install verified inside a minimal Ubuntu 24.04 container on 2026-10-05, Docker 28.4.0), but there is **no public registry release yet** — the PyPI name `qingniao` is occupied by an unrelated project, and the public package name is still being decided. Real-provider evidence: MiniMax M3 is fully validated through the import path (preflight, offline import, private store, gateway first requests, restart persistence); glm-5.3-flash was **rate-limited (429) at validation time** and its full import leg could not be run within the real-request budget — that gap is recorded, not papered over. Earlier `qing run` real-provider evidence (2026-09-08) covers both configurations; the optional fresh claude run in this acceptance was skipped when the request budget ran out. No other provider, endpoint or model has been verified.
+> **Early development — runnable core, release path being assembled.** The gateway, the `qing` CLI, per-instance model routing, the Claude Code launcher and the `qing config import-claude` flow (settings import with a local private credential store) are implemented. The release **artifact** is buildable and installable (clean Linux install verified inside a minimal Ubuntu 24.04 container on 2026-10-05, Docker 28.4.0), but there is **no public registry release yet** — the distribution package name is `qingniao-gateway` (PyPI `qingniao` is occupied by an unrelated project) and publishing waits for explicit approval. Real-provider evidence: **both** MiniMax M3 and glm-5.3-flash (personal GLM plan) are fully validated through the import path (preflight, offline import, private store, gateway first requests, restart persistence), and a real Claude Code session (2.1.274) ran through `qing run` on the glm-5.3-flash upstream. No other provider, endpoint or model has been verified.
 
 ## Your next model shouldn't need another config file
 
@@ -126,20 +126,21 @@ clean-install acceptance.
 
 ## Verification (2026-10-05)
 
-- **Real import-path validation** (`experiments/real-provider-verification/run_import_validation.py`):
-  with the real request budget capped at 10 (used: exactly 10, all counted
-  before firing), MiniMax M3 (`MiniMax-M3` at
-  `https://api.minimaxi.com/anthropic`, `Authorization: Bearer`) passed a
-  full import-path run: preflight 200 with the exact model echo, offline
-  `config import-claude` preview with zero writes, `--apply` storing the
-  credential in the private store (no key in the configuration), gateway
-  first requests with the correct upstream model string and faithfully
-  recorded usage, and a private credential usable after a gateway restart.
-  glm-5.3-flash (`https://open.bigmodel.cn/api/anthropic`) answered
-  **every preflight probe with 429 rate_limit_error** (three probes across
-  the acceptance session, hours apart) and its import leg was not run;
-  that provider-side block is recorded as a gap, not bypassed. The optional real-`claude` `qing run` leg was skipped when the
-  budget ran out.
+- **Real import-path validation** (`experiments/real-provider-verification/run_import_validation.py`
+  plus `run_wave4_validation.py`): with the real request budget capped at 10
+  per wave (every request counted before firing; cumulative ledger 11 before
+  wave 4), **both** MiniMax M3 (`MiniMax-M3` at
+  `https://api.minimaxi.com/anthropic`) and glm-5.3-flash (at
+  `https://open.bigmodel.cn/api/anthropic`, personal GLM plan; bearer auth on
+  both) passed a full import-path run: preflight 200 with the exact model
+  echo, offline `config import-claude` preview with zero writes, `--apply`
+  storing the credential in the private store (no key in the configuration),
+  gateway first requests with the correct upstream model string and
+  faithfully recorded usage, and a private credential usable after a gateway
+  restart. A real Claude Code 2.1.274 session then ran through `qing run` on
+  the glm-5.3-flash upstream (single minimal print-mode turn, routed success
+  record) — wave 4 fired 4 real requests (cumulative 15) and the MiMo
+  fallback was not exercised because the GLM leg passed.
 - **Clean Linux install** (`experiments/clean-install-verification/`): in a
   minimal Ubuntu 24.04.3 container (Docker 28.4.0, no source checkout), the
   wheel installed via `uv tool install`, `qing --version` printed `0.1.0`,

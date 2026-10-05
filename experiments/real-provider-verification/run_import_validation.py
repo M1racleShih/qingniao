@@ -5,7 +5,7 @@ persistence, and (budget permitting) a real `claude` run through `qing run`.
 
 Authorized configurations (no others):
 - MiniMax M3   at https://api.minimaxi.com/anthropic   (env MINIMAX_API_KEY)
-- glm-5.3-flash at https://open.bigmodel.cn/api/anthropic (env ZAI_API_KEY_TEAM)
+- glm-5.3-flash at https://open.bigmodel.cn/api/anthropic (env Z_AI_API_KEY; personal GLM plan)
 
 Scenario:
 1. Preflight: one minimal real message per provider to confirm the exact
@@ -71,7 +71,7 @@ ZAI_BASE = "https://open.bigmodel.cn/api/anthropic"
 MINIMAX_MODEL = "MiniMax-M3"
 ZAI_MODEL = "glm-5.3-flash"
 MINIMAX_ENV = "MINIMAX_API_KEY"
-ZAI_ENV = "ZAI_API_KEY_TEAM"
+ZAI_ENV = "Z_AI_API_KEY"  # personal GLM plan (team key is no longer authorized)
 CREDENTIAL_ENVS = (MINIMAX_ENV, ZAI_ENV)
 
 AUTHORIZED_ALL = (

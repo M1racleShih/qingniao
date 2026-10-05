@@ -16,7 +16,7 @@
   <a href="CONTRIBUTING.md">参与贡献（英文）</a>
 </p>
 
-> **早期开发——核心可运行，发布路径正在组装。** 网关、`qing` CLI、按实例的模型路由、Claude Code 启动器和 `qing config import-claude` 配置导入（含本地私密凭证存储）已经实现。发布**产物**可构建、可安装（2026-10-05 已在最小 Ubuntu 24.04 容器内验证干净 Linux 安装，Docker 28.4.0），但**尚无公开注册表发布**——PyPI 名 `qingniao` 被无关项目占用，分发包名定为 `qingniao-gateway`。真实供应商证据：MiniMax M3 已完整通过导入路径验证（预检、离线导入、私密存储、网关首请求、重启持久化）；glm-5.3-flash 在验证时被**限流（429）**，其完整导入环节未能在真实请求预算内运行——该缺口如实记录、未绕过。更早的 `qing run` 真实供应商证据（2026-09-08）覆盖两个配置；本次验收中可选的真实 claude 运行因请求预算耗尽而跳过。未对任何其他供应商、端点或模型做验证。
+> **早期开发——核心可运行，发布路径正在组装。** 网关、`qing` CLI、按实例的模型路由、Claude Code 启动器和 `qing config import-claude` 配置导入（含本地私密凭证存储）已经实现。发布**产物**可构建、可安装（2026-10-05 已在最小 Ubuntu 24.04 容器内验证干净 Linux 安装，Docker 28.4.0），但**尚无公开注册表发布**——分发包名定为 `qingniao-gateway`（PyPI 名 `qingniao` 被无关项目占用），发布等待显式授权。真实供应商证据：**MiniMax M3 与 glm-5.3-flash（个人 GLM 套餐）均已完整通过导入路径验证**（预检、离线导入、私密存储、网关首请求、重启持久化），且真实 Claude Code（2.1.274）经 `qing run` 在 glm-5.3-flash 上游上完成一轮最小会话。未对任何其他供应商、端点或模型做验证。
 
 ## 换个模型，不该还要换一份配置
 
@@ -106,7 +106,7 @@ qing --version        # 打印发布版本（0.1.0）
 
 ## 验证声明（2026-10-05）
 
-- **真实导入路径验证**（`experiments/real-provider-verification/run_import_validation.py`）：真实请求预算上限 10（实际使用正好 10，均先计数后发起）。MiniMax M3（`MiniMax-M3` @ `https://api.minimaxi.com/anthropic`，`Authorization: Bearer`）通过完整导入路径：预检 200 且模型串精确回显、离线 `config import-claude` 预览零写入、`--apply` 凭证入私密存储（配置中无密钥）、网关首请求上游模型串正确且用量如实记录、重启后私密凭证仍可用。glm-5.3-flash（`https://open.bigmodel.cn/api/anthropic`）在**每次预检探测中均返回 429 rate_limit_error**（验收会话期间相隔数小时的三次探测），其导入环节未运行——该供应商侧阻塞被如实记录为缺口，未做替代或绕过。可选的真实 `claude` `qing run` 环节因预算耗尽而跳过。
+- **真实导入路径验证**（`experiments/real-provider-verification/run_import_validation.py` 与 `run_wave4_validation.py`）：每个波次的真实请求预算上限 10（每条请求均先计数后发起；第 4 波前累计账本为 11）。**MiniMax M3**（`MiniMax-M3` @ `https://api.minimaxi.com/anthropic`，`Authorization: Bearer`）与 **glm-5.3-flash**（`https://open.bigmodel.cn/api/anthropic`，个人 GLM 套餐）均通过完整导入路径：预检 200 且模型串精确回显、离线 `config import-claude` 预览零写入、`--apply` 凭证入私密存储（配置中无密钥）、网关首请求上游模型串正确且用量如实记录、重启后私密凭证仍可用。随后真实 Claude Code 2.1.274 经 `qing run` 在 glm-5.3-flash 上游上完成一轮最小会话（成功记录路由到预期供应商）——第 4 波共发起 4 条真实请求（累计 15）；MiMo 兜底未被触发（GLM 环节已通过）。
 - **干净 Linux 安装**（`experiments/clean-install-verification/`）：在最小 Ubuntu 24.04.3 容器（Docker 28.4.0，无源码检出）中，wheel 经 `uv tool install` 安装，`qing --version` 输出 `0.1.0`，网关完成一个本地合成首请求（上游观察到正确模型串），`uv tool uninstall qingniao-gateway` 后 CLI 消失而状态目录保留。
 - 更早的真实供应商证据（2026-09-08，`qing run` 覆盖两个配置）记录在 [docs/development.md](docs/development.md)。
 
