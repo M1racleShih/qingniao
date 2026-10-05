@@ -40,9 +40,17 @@ reports the package version through installed metadata, falling back to
 
 The sdist contains only public code and documentation; tests, experiments
 and every personal path (agent skills, the private spec workflow) are
-excluded by the packaging config in `pyproject.toml`. A content audit is
-part of the release acceptance (see `experiments/clean-install-verification/`
-and the verification sections in the README).
+excluded by the packaging config in `pyproject.toml`. The include
+patterns are root-anchored (gitignore semantics — a bare `README.md`
+would match recursively) and the personal/agent-tool directories
+(`.agents`, `.claude`, `.kimi`, `.pi`, `.maintainer`, `**/skills`) are
+also listed in the exclude set, so even building from a working tree that
+contains gitignored personal directories packages none of them.
+`tests/test_distribution.py` rebuilds the sdist in-process with sentinel
+personal READMEs and asserts none of them reach the artifact. A content
+audit is part of the release acceptance (see
+`experiments/clean-install-verification/` and the verification sections
+in the README).
 
 A clean Linux install from the wheel (no source checkout) was verified on
 2026-10-05 in a minimal Ubuntu 24.04.3 container: `uv tool install` of the

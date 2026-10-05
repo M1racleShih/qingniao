@@ -20,6 +20,9 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "openapi-spec-validator>=0.7",
+    # hatchling is the build backend; the distribution audit test builds
+    # sdists in-process to lock the packaged file set
+    "hatchling>=1.30",
 ]
 
 [build-system]
@@ -32,22 +35,34 @@ packages = ["src/qingniao"]
 # The sdist carries only public code and documentation: the package, the
 # public docs, the examples, the licensing and contribution files. Tests,
 # experiments and everything personal (agent skills, the private spec
-# workflow) are never packaged. `exclude` complements `include` because
-# bare patterns like README.md match recursively.
+# workflow) are never packaged.
+#
+# Include patterns are root-anchored (leading `/`, gitignore semantics): a
+# bare `README.md` would match recursively and could pull README files out
+# of gitignored directories (for example `.claude/skills/...`) when
+# building from a working tree that contains them. The exclude list also
+# names the personal/agent-tool directories explicitly, so builds from a
+# dirty working tree still never package them.
 [tool.hatch.build.targets.sdist]
 include = [
-  "src/qingniao",
-  "docs",
-  "examples",
-  "README.md",
-  "README.zh-CN.md",
-  "LICENSE",
-  "CONTRIBUTING.md",
-  "pyproject.toml",
+  "/src/qingniao",
+  "/docs",
+  "/examples",
+  "/README.md",
+  "/README.zh-CN.md",
+  "/LICENSE",
+  "/CONTRIBUTING.md",
+  "/pyproject.toml",
 ]
 exclude = [
   "tests",
   "experiments",
+  ".agents",
+  ".claude",
+  ".kimi",
+  ".pi",
+  ".maintainer",
+  "**/skills",
   "docs/assets/screenshots",
 ]
 
