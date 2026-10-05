@@ -87,12 +87,67 @@ replaces the complete defaults and only affects instances created
 afterwards. `qing run --preview` shows the onboarding impact without
 registering an instance or writing anything.
 
+## Daily catalog management (entry-level CRUD)
+
+`qing provider`, `qing credential` and `qing model` manage providers,
+credential sources and models one entry at a time instead of rewriting
+the whole configuration with `qing config apply` (which stays the
+advanced whole-config entry point). Every command is non-interactive,
+accepts `--json`, uses stable machine error codes and exit codes 0/1/2,
+and every mutating command supports `--dry-run`. See `docs/api.md` for
+the full command reference, JSON output contract and error-code table;
+the examples below are reproducible against a running `qing serve`:
+
+```
+# env-sourced provider: the value lives in the gateway process env
+uv run qing provider add my-provider --base-url https://api.example.com \
+  --auth bearer --credential-env MY_TOKEN
+
+# a named env credential in the catalog, referenced by id
+uv run qing credential add shared-key --env MY_TOKEN
+uv run qing provider add p2 --base-url https://other.example \
+  --auth x-api-key --credential-id shared-key
+
+# a private credential: the value enters through stdin/file only
+uv run qing credential add --from-file /path/to/token
+
+# models map catalog providers to exact upstream strings
+uv run qing model add my-model --provider my-provider --upstream-model vendor/model
+
+uv run qing provider list && qing model list && qing credential list
+uv run qing provider set my-provider --base-url https://new.example
+uv run qing model rm my-model          # fails with entry_in_use if referenced
+uv run qing provider rm my-provider    # fails while a model references it
+```
+
+Mutating commands are read-modify-write transactions through the running
+gateway (GET config → change one entry → conditional PUT with
+`expected_generation`): a concurrent edit fails with
+`generation_conflict` instead of silently overwriting, and a stopped
+gateway fails with the change unconfirmed. Deletes are protected by
+reference checks — no cascades, no silent rewrites. Credential values
+never appear on the command line, in output, JSON, errors or logs;
+`credential show`/`list` return metadata only, and private store
+versions are immutable (removing a catalog entry never deletes a store
+version; that follows the existing recovery/version rules).
+
+The optional `credentials` top-level configuration section stores the
+catalog (`{"source": "env", "env": NAME}` or `{"source": "private"}`
+entries); it is additive to format version 1, absent sections behave as
+empty, and providers may reference a catalog id (resolved by the
+gateway at request time) or a direct `cred_<hex>` private id.
+
 ## Project layout
 
 - `src/qingniao/config.py` — shared configuration schema (format version 1 with
-  legacy read-only compatibility), validation, atomic persistence, generation
+  legacy read-only compatibility), validation, atomic persistence, generation;
+  the optional `credentials` catalog section is parsed and cross-validated here
 - `src/qingniao/gateway.py` — instances, immutable typed-credential route
-  snapshots, leases, CAS updates, the serialized write path
+  snapshots, leases, CAS updates, the serialized write path; catalog
+  credential entries resolve to env/private sources at request time
+- `src/qingniao/catalog.py` — entry-level catalog logic: entry views,
+  referential integrity checks, credential resolution, edited-schema
+  validation (no I/O; the CLI owns the transaction)
 - `src/qingniao/state.py` — state directory, discovery file, single-gateway guard
 - `src/qingniao/credentials.py` — private immutable credential store
   (0700/0600, symlink/owner/mode/type checks, fsynced writes)
@@ -151,6 +206,18 @@ registering an instance or writing anything.
   variables, offline/online import, a real gateway process, a fake
   Claude client through `qing run`, restart persistence — local fixtures
   only, never a real-provider claim
+- entry-level catalog CRUD: schema round-trips and cross-validation of
+  the `credentials` section, entry views and referential integrity,
+  credential resolution, a CLI matrix against a real gateway (JSON
+  structure, exit codes 0/1/2, dry-run zero writes, no-op sets,
+  help snapshots, 40/80/120 widths, NO_COLOR), two concurrent
+  read-modify-write writers on one generation with exactly one winner,
+  and an end-to-end chain where two providers/two models created through
+  the new commands serve requests to synthetic upstreams and a live
+  `route set` switch reaches the expected upstream with the expected
+  model string; synthetic-secret scans cover the full credential path
+  (stdin/file input, argv rejection, metadata-only output, unreachable
+  gateway failures, state artifacts)
 
 ## Running Claude Code through the launcher
 

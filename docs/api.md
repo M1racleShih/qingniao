@@ -45,6 +45,11 @@ Every **gateway-generated** error is JSON with a stable `code`:
 | `generation_conflict` | 409 | conditional write with a stale generation (`current_generation` included) |
 | `import_plan_mismatch` | 409 | operation id reused with a different plan |
 | `request_too_large` | 413 | import plan body above the size limit |
+| `entry_exists` | CLI 1 | an add targets a catalog id that already exists (no write) |
+| `entry_not_found` | CLI 1 | a set/show/rm targets a catalog id that does not exist (no write) |
+| `entry_in_use` | CLI 1 | a delete would break a reference; `references` lists every reference (no write) |
+| `invalid_argument` | CLI 1 | a catalog command received an invalid value (bad auth mode, malformed URL, invalid env name, conflicting sources); `errors[]` lists field problems |
+| `cli_error` | CLI 1/2 | generic CLI or usage failure |
 | `credential_missing` | 500 | credential source absent at request time — env var unset, private version not present (no upstream call) |
 | `credential_invalid` / `credential_unreadable` | 500 | private credential store refused the access (malformed id, unsafe permissions, symlink, foreign owner, non-regular file); sanitized category only |
 | `config_persist_failed` | 500 | configuration validated but could not be persisted (disk state and running config unchanged) |
@@ -79,17 +84,27 @@ format version 1:
   "providers": {"p": {"base_url": "https://…", "credential_env": "NAME",
                       "auth": "bearer"}},
   "models": {"m": {"provider": "p", "upstream_model": "exact-upstream"}},
+  "credentials": {"shared": {"source": "env", "env": "NAME"}},
   "defaults": {"model": "r", "aux_model": "r2", "routes": {"r": "m"}}
 }
 ```
 
 A provider carries **exactly one** credential source: `credential_env`
-(read from the gateway process) or `credential_id` (an immutable version
-in the private credential store under `<state-dir>/credentials`, created
-by `qing config import-claude`; the secret itself never appears in the
-configuration, responses or logs). Unknown future `schema_version`
-values are rejected — never migrated or overwritten. The first write
-that upgrades a legacy file snapshots the old bytes as
+(read from the gateway process) or `credential_id` (a credential catalog
+id or an immutable version in the private credential store under
+`<state-dir>/credentials`, created by `qing config import-claude` or
+`qing credential add --from-stdin`; the secret itself never appears in the
+configuration, responses or logs). The optional `credentials` section
+names catalog credentials: `{"source": "env", "env": NAME}` reads the
+credential from the gateway process environment variable `NAME`, and
+`{"source": "private"}` refers to an immutable private store version.
+A provider may reference either an env-type catalog id (the gateway
+resolves the environment variable at request time) or a direct
+`cred_<hex>` id; `credential_id` values that are neither in the catalog
+nor valid private ids are rejected. An absent `credentials` section is
+valid and behaves as empty. Unknown future `schema_version` values are
+rejected — never migrated or overwritten. The first write that upgrades a
+legacy file snapshots the old bytes as
 `config.backup.pre-v1.json`; to roll back, stop the gateway, restore
 that backup and use the older program (imported private connections do
 not carry back and their files are not auto-deleted).
@@ -263,6 +278,82 @@ collisions with different content; missing decisions fail with zero
 writes. The source file is never modified, and a preview is invalidated
 when the file changes before the apply. `qing config operation <id>`
 queries a submitted operation.
+
+## Entry-level catalog commands
+
+`qing provider` , `qing credential` and `qing model` manage catalog
+entries without rewriting the whole configuration. The three groups are
+designed for humans and agents alike:
+
+- **Non-interactive.** No command prompts or asks for confirmation; a
+  missing required option is a usage error (exit code 2) that lists what
+  is missing. Destructive operations rely on `--dry-run` and reference
+  protection instead of a y/n prompt.
+- **Machine-readable `--json`.** Every command accepts `--json`. Success
+  is `{"ok": true, ...}` with entries in the same shape as the control
+  API configuration (a provider is `{"id", "base_url", "auth",
+  "credential_env" | "credential_id"}`, a model is
+  `{"id", "provider", "upstream_model"}`); lists are
+  `{"ok": true, "providers": [...]}` / `{"ok": true, "models":
+  [...]}` / `{"ok": true, "credentials": [...]}`. Failure (JSON mode)
+  is `{"ok": false, "error": {"code", "message", ...details}}` on
+  stdout; human mode prints one `error: ...` line on stderr. Output is
+  free of ANSI escape sequences when `NO_COLOR` is set or stdout is
+  redirected, and values are soft-wrapped but never truncated at widths
+  40/80/120.
+- **Exit codes.** 0 on success, 1 for expected failures (stable machine
+  code in the error payload), 2 for usage errors. Machine-distinguishable
+  codes include `entry_exists`, `entry_not_found`, `entry_in_use`,
+  `generation_conflict` and `invalid_argument` (see the error table
+  above).
+- **Read-modify-write with generation checks.** Every mutating command
+  reads the current configuration, changes exactly one entry and
+  commits a conditional `PUT /config?expected_generation=N`. A
+  concurrently-changed generation fails with `generation_conflict` and
+  changes nothing; a stopped gateway fails with `gateway_unreachable`
+  and reports the change as unconfirmed. Saving or applying is never
+  described as a connection verification.
+- **`--dry-run`.** Every mutating command supports `--dry-run`: it
+  describes the minimal change (JSON `{"ok": true, "dry_run": true,
+  "changes": {...}}`) without writing files or calling a change
+  endpoint. A dry run of `credential add` reads no secret.
+- **Referential integrity.** `provider rm`, `model rm` and
+  `credential rm` fail with `entry_in_use` (listing every reference —
+  model ids, `defaults.model`/`defaults.aux_model`/`defaults.routes.<k>`
+  locations, or provider ids) when a delete would break a reference.
+  There is no cascade delete and no silent rewrite; running instances
+  keep their immutable snapshots per the instance-routing rules.
+
+```
+qing provider add  <id> --base-url URL --auth bearer|x-api-key (--credential-env NAME | --credential-id ID)
+qing provider list
+qing provider show <id>
+qing provider set  <id> [--base-url URL] [--auth ...] [--credential-env NAME | --credential-id ID]
+qing provider rm   <id>
+
+qing credential list
+qing credential show <id>
+qing credential add <id> --env NAME              # env-variable source
+qing credential add --from-stdin | --from-file PATH   # private store
+qing credential rm  <id>
+
+qing model add  <id> --provider PID --upstream-model NAME
+qing model list
+qing model show <id>
+qing model set  <id> [--provider PID] [--upstream-model NAME]
+qing model rm   <id>
+```
+
+**Secrets.** Credential values enter only through `--from-stdin` or
+`--from-file` (or `--env`, which names an environment variable the
+gateway process already holds); a value is never accepted as a
+command-line argument, and `credential show`/`credential list` return
+metadata (id, source type, env name or `private`, referencing providers)
+only — never the value or a reversible mask. The value, argv, stdout,
+stderr, JSON output, errors and logs all stay free of secret material;
+the private store commits the value only into `<state-dir>/credentials`
+as an immutable 0600 version, and its catalog entry is registered in
+the same single transaction.
 
 Route changes are only reported as applied on a well-formed acknowledgement
 matching the intended instance, request model, destination and expected

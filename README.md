@@ -30,7 +30,7 @@ Your agent stays where you work. Qingniao keeps the connections in order.
 
 The first release will be operated through `qing` in the terminal. Clear layouts, readable status feedback, and useful errors are part of the [planned terminal experience](docs/terminal-experience.md). A web GUI may follow based on actual usage.
 
-**Connect once.** Import your existing Claude settings with `qing config import-claude` — a desensitized preview first, then one explicit apply that stores the credential in a local private store (plain 0600 files, not an encrypted vault) and never touches your original file. Or add providers and models by hand with `qing config apply`.
+**Connect once.** Import your existing Claude settings with `qing config import-claude` — a desensitized preview first, then one explicit apply that stores the credential in a local private store (plain 0600 files, not an encrypted vault) and never touches your original file. Or manage the catalog one entry at a time with `qing provider`, `qing credential` and `qing model` — add, list, show, set and remove providers, credential sources and models without rewriting the whole configuration (advanced whole-config edits still go through `qing config apply`). The commands are non-interactive and agent-friendly: stable `--json` output, machine error codes, `--dry-run` previews, reference-protected deletes, and credential values that only enter through stdin or a file — never the command line.
 
 **Switch without the setup ritual.** Share provider and credential configuration across your Claude Code instances while choosing models independently in each one. Use `qing` to change a route for a specific instance without changing other instances. After the gateway confirms the update, new requests from that instance use the new route without a restart; requests already in progress keep their original destination. Default changes apply only to new instances.
 
@@ -70,8 +70,22 @@ uv run qing requests                # sanitized per-request metadata (usage unkn
 
 Alternatively skip the import and reference exported variables (`export
 MY_PROVIDER_TOKEN=...` before `qing serve`; the value is never stored in
-the configuration). `qing run --preview` shows what attaching would do
-without registering anything.
+the configuration), or manage the catalog one entry at a time —
+non-interactive, `--json`-friendly and secret-safe:
+
+```
+uv run qing provider add my-provider --base-url https://api.example.com \
+  --auth bearer --credential-env MY_PROVIDER_TOKEN
+uv run qing model add my-model --provider my-provider --upstream-model vendor/model
+uv run qing provider list && qing model list
+```
+
+`qing credential add --env NAME` registers a named env credential that
+providers reference by id; `qing credential add --from-stdin` (or
+`--from-file`) stores a private credential whose value never appears in
+argv, output, JSON, errors or logs. `--dry-run` previews every change;
+deletes refuse to break references. `qing run --preview` shows what
+attaching would do without registering anything.
 
 Credentials must be exported in the gateway's shell **before** `qing serve`; exporting later in another shell does not affect a running gateway. `qing run` gives every launch (including `--resume`) a fresh instance identity, injects the transport through a temporary 0600 settings file (never in argv), preserves your Claude settings, history and tools, and reports honestly: registered vs. started vs. first gateway-observed request. See [docs/development.md](docs/development.md) and [docs/api.md](docs/api.md).
 

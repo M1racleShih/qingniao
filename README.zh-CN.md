@@ -32,7 +32,7 @@
 
 首版通过终端中的 `qing` 完成操作，清晰的布局、易读的状态反馈和有用的错误提示都是[终端体验规划（英文）](docs/terminal-experience.md)的一部分。Web GUI 根据实际使用情况再决定。
 
-**接入一次，准备就绪。** 用 `qing config import-claude` 导入现有 Claude 配置——先出脱敏预览，再显式应用：凭证存入本地私密存储（0600 明文文件，不是加密保险箱），原文件保持不变。也可以用 `qing config apply` 手工添加供应商和模型。
+**接入一次，准备就绪。** 用 `qing config import-claude` 导入现有 Claude 配置——先出脱敏预览，再显式应用：凭证存入本地私密存储（0600 明文文件，不是加密保险箱），原文件保持不变。也可以用 `qing provider`、`qing credential` 和 `qing model` 逐条管理目录——增、查、列、改、删供应商、凭证来源与模型，无需重写整份配置（整份高级编辑仍走 `qing config apply`）。这些命令非交互且对 agent 友好：稳定的 `--json` 输出、机器错误码、`--dry-run` 预览、引用保护式删除，凭证值只能经标准输入或文件传入，绝不经过命令行。
 
 **切换模型，不再重复配置。** 多个 Claude Code 实例共享供应商与凭证配置，各自独立选择模型。通过 `qing` 修改指定实例的路由，不改变其他实例。网关确认更新后，该实例的新请求使用新路由，已经进行中的请求保持原有去向，无需重启。修改默认值仅影响新实例。
 
@@ -72,7 +72,16 @@ uv run qing instances               # 路由、revision 与各实例状态
 uv run qing requests                # 脱敏的请求元数据（用量未知 vs 真实 0）
 ```
 
-也可以跳过导入，直接引用已 export 的环境变量（在 `qing serve` 之前 `export MY_PROVIDER_TOKEN=...`；凭证值不会写进配置文件）。`qing run --preview` 可以在不注册任何实例的情况下预览接入影响。
+也可以跳过导入，直接引用已 export 的环境变量（在 `qing serve` 之前 `export MY_PROVIDER_TOKEN=...`；凭证值不会写进配置文件），或逐条管理目录——非交互、支持 `--json`、秘密安全：
+
+```
+uv run qing provider add my-provider --base-url https://api.example.com \
+  --auth bearer --credential-env MY_PROVIDER_TOKEN
+uv run qing model add my-model --provider my-provider --upstream-model vendor/model
+uv run qing provider list && qing model list
+```
+
+`qing credential add --env NAME` 注册命名环境变量凭证，供供应商按 id 引用；`qing credential add --from-stdin`（或 `--from-file`）存储私密凭证，其值绝不进入 argv、输出、JSON、错误或日志。每个变更都支持 `--dry-run` 预览；删除操作拒绝破坏引用。`qing run --preview` 可以在不注册任何实例的情况下预览接入影响。
 
 凭证必须在启动 `qing serve` 的 shell 中**事先** export；之后在其他 shell 里 export 不会影响正在运行的网关。`qing run` 每次启动（包括 `--resume`）都生成新的实例身份，通过临时 0600 设置文件注入传输配置（绝不进入 argv），保留你的 Claude 配置、会话历史与工具，并如实区分：已注册 / 子进程已启动 / 网关观察到首个请求。详见 [docs/development.md](docs/development.md) 与 [docs/api.md](docs/api.md)。
 
