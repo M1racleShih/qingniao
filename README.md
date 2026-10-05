@@ -135,10 +135,10 @@ clean-install acceptance.
   credential in the private store (no key in the configuration), gateway
   first requests with the correct upstream model string and faithfully
   recorded usage, and a private credential usable after a gateway restart.
-  glm-5.3-flash (`https://open.bigmodel.cn/api/anthropic`) answered the
-  preflight with **429 rate_limit_error** on both attempts and its import
-  leg was not run; that provider-side block is recorded as a gap, not
-  bypassed. The optional real-`claude` `qing run` leg was skipped when the
+  glm-5.3-flash (`https://open.bigmodel.cn/api/anthropic`) answered
+  **every preflight probe with 429 rate_limit_error** (three probes across
+  the acceptance session, hours apart) and its import leg was not run;
+  that provider-side block is recorded as a gap, not bypassed. The optional real-`claude` `qing run` leg was skipped when the
   budget ran out.
 - **Clean Linux install** (`experiments/clean-install-verification/`): in a
   minimal Ubuntu 24.04.3 container (Docker 28.4.0, no source checkout), the

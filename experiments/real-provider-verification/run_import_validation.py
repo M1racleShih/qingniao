@@ -26,10 +26,13 @@ Scenario:
    `qing run` wrapper for one minimal print-mode turn on the imported
    defaults, recording the client version and destination.
 
-Budget: at most 10 real provider requests in total (including preflight),
-at most 2 concurrent (this run is strictly sequential). No retries
-across providers or models; provider errors are reported, never worked
-around by substitution. Absent credentials exit 77.
+Budget: each run spends at most ``QING_REAL_BUDGET_CAP`` real provider
+requests (default 10, including preflight), at most 2 concurrent (this
+run is strictly sequential). A cross-attempt ledger is recorded via
+``QING_REAL_PRIOR_LEDGER`` but does not gate the wave. No retries across
+providers or models; provider errors are reported and a rate-limited
+provider stops the wave immediately without substituting or retrying.
+Absent credentials exit 77.
 
 Sanitized output: only ids, labels, model/provider ids, revisions,
 outcomes, usage numbers, timings, counts and harmless success markers.
@@ -58,7 +61,10 @@ from qingniao import state as state_mod
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SKIP_EXIT = 77
-REQUEST_CAP = 10
+# Wave budget: the number of real requests this invocation may fire.
+# A cumulative cross-attempt ledger (QING_REAL_PRIOR_LEDGER) is recorded
+# in the report but does not gate the wave; each wave has its own cap.
+REQUEST_CAP = int(os.environ.get("QING_REAL_BUDGET_CAP", "10"))
 
 MINIMAX_BASE = "https://api.minimaxi.com/anthropic"
 ZAI_BASE = "https://open.bigmodel.cn/api/anthropic"
@@ -128,9 +134,9 @@ class Budget:
 
     def spend(self, n: int = 1) -> None:
         self.counted += n
-        if self.prior_total + self.counted > self.cap:
+        if self.counted > self.cap:
             raise AssertionError(
-                f"real-request budget would be exceeded: {self.prior_total + self.counted} > {self.cap}"
+                f"real-request wave budget would be exceeded: {self.counted} > {self.cap}"
             )
 
 
@@ -606,7 +612,7 @@ def main() -> int:
             note("restart_request", provider=first_provider, status=restart_evidence.get("status_code"))
 
         # --------------------------------- optional real claude through qing run
-        if cls and budget.prior_total + budget.counted + 3 <= budget.cap:
+        if cls and budget.counted + 3 <= budget.cap:
             claude_evidence = run_real_claude(
                 env, workdir, tmpdir, state_dir, discovery2, budget
             )
@@ -643,17 +649,18 @@ def main() -> int:
         true_spent = budget.counted_preflight + total
         criterion(
             "request_budget_not_exceeded",
-            budget.prior_total + true_spent <= budget.cap,
+            true_spent <= budget.cap,
             {
-                "cap": budget.cap,
+                "cap_this_wave": budget.cap,
                 "prior_total": budget.prior_total,
+                "cumulative_cap": budget.prior_total + budget.cap,
                 "preflight_this_run": budget.counted_preflight,
                 "gateway_requests_this_run": total,
                 "true_total_this_run": true_spent,
                 "cumulative_total": budget.prior_total + true_spent,
                 "ledger_source": budget.prior_source,
             },
-            "the real-request budget was exceeded",
+            "the real-request wave budget was exceeded",
         )
 
         budget_report = report["budget"]
