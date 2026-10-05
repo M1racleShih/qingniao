@@ -37,7 +37,7 @@ From the repository (build the wheel first):
 uv build --wheel
 docker build -t qingniao-install-test \
   -f experiments/clean-install-verification/Dockerfile experiments/clean-install-verification \
-  --build-arg WHEEL=dist/qingniao-0.1.0-py3-none-any.whl
+  --build-arg WHEEL=dist/qingniao_gateway-0.1.0-py3-none-any.whl
 ```
 
 The Dockerfile copies `qingniao.whl` from the build context, so copy the
@@ -52,7 +52,7 @@ command using the wheel's own virtualenv interpreter. It verifies:
    config routes one request whose upstream model string is observed by
    the fixture, proving the local flow with a fresh install. No real
    provider is contacted; no real request budget is spent.
-3. **uninstall_preserves_user_data** — `uv tool uninstall qingniao`
+3. **uninstall_preserves_user_data** — `uv tool uninstall qingniao-gateway`
    removes the CLI (`qing` no longer resolves), while the explicit state
    directory (`/root/qing-state`: `config.json`, `serve.log`,
    `gateway.lock`, ...) is preserved, matching the documented policy that

@@ -190,7 +190,7 @@ def test_version_consistent_with_package_metadata():
     # release-readiness contract: the CLI, the package metadata and the
     # release artifact must agree on the version
     try:
-        installed = metadata_version("qingniao")
+        installed = metadata_version("qingniao-gateway")
     except Exception:
         installed = None
     if installed is not None:

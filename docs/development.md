@@ -55,7 +55,7 @@ in the README).
 A clean Linux install from the wheel (no source checkout) was verified on
 2026-10-05 in a minimal Ubuntu 24.04.3 container: `uv tool install` of the
 wheel, `qing --version` matching the release version, one local synthetic
-first request through `qing serve`, and `uv tool uninstall qingniao`
+first request through `qing serve`, and `uv tool uninstall qingniao-gateway`
 removing the CLI while the state directory is preserved. The reproduction
 lives in `experiments/clean-install-verification/`.
 
@@ -321,8 +321,8 @@ Reproduce with both credentials exported in the gateway shell: `uv run --locked 
   proxy aliases that loop back to the gateway cannot be detected by the
   offline self-reference check.
 - A **public** published installation path does not exist yet: the clean
-  Linux install from a locally built artifact is verified, but the public
-  package name is still being decided (PyPI `qingniao` is occupied) and
+  Linux install from a locally built artifact is verified, but the distribution
+  package name is now `qingniao-gateway` (PyPI `qingniao` is occupied) and
   publishing waits for an explicit maintainer authorization.
 - The launcher has been exercised against Claude Code 2.1.251 (2026-09-08
   acceptance) and Claude Code 2.1.274 is present in this environment; a

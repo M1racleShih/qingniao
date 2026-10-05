@@ -1,5 +1,5 @@
 [project]
-name = "qingniao"
+name = "qingniao-gateway"
 version = "0.1.0"
 description = "Qingniao gateway: shared connection catalog with per-instance routing for Claude Code"
 readme = "README.md"

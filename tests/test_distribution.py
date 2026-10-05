@@ -87,6 +87,6 @@ def test_sdist_keeps_all_public_files(tmp_path):
 def test_sdist_readme_matching_is_root_anchored(tmp_path):
     names = sorted(n for n in _sdist_names(tmp_path) if n.endswith("README.md"))
     assert names == [
-        "qingniao-0.1.0/README.md",
-        "qingniao-0.1.0/examples/README.md",
+        "qingniao_gateway-0.1.0/README.md",
+        "qingniao_gateway-0.1.0/examples/README.md",
     ], names

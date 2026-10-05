@@ -148,7 +148,7 @@ def main() -> int:
     def check_uninstall_preserves_data() -> None:
         assert os.path.exists(os.path.join(STATE, "config.json")), "state config missing before uninstall"
         # uninstall per the documented command; removes only the tool
-        removed = sh("uv", "tool", "uninstall", "qingniao")
+        removed = sh("uv", "tool", "uninstall", "qingniao-gateway")
         assert removed.returncode == 0, f"uv tool uninstall failed: {removed.stdout} {removed.stderr}"
         # qing must no longer resolve after uninstall (subprocess raises
         # FileNotFoundError when the executable is absent, which is the

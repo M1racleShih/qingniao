@@ -16,7 +16,7 @@
   <a href="CONTRIBUTING.md">参与贡献（英文）</a>
 </p>
 
-> **早期开发——核心可运行，发布路径正在组装。** 网关、`qing` CLI、按实例的模型路由、Claude Code 启动器和 `qing config import-claude` 配置导入（含本地私密凭证存储）已经实现。发布**产物**可构建、可安装（2026-10-05 已在最小 Ubuntu 24.04 容器内验证干净 Linux 安装，Docker 28.4.0），但**尚无公开注册表发布**——PyPI 名 `qingniao` 被无关项目占用，公开包名仍未选定。真实供应商证据：MiniMax M3 已完整通过导入路径验证（预检、离线导入、私密存储、网关首请求、重启持久化）；glm-5.3-flash 在验证时被**限流（429）**，其完整导入环节未能在真实请求预算内运行——该缺口如实记录、未绕过。更早的 `qing run` 真实供应商证据（2026-09-08）覆盖两个配置；本次验收中可选的真实 claude 运行因请求预算耗尽而跳过。未对任何其他供应商、端点或模型做验证。
+> **早期开发——核心可运行，发布路径正在组装。** 网关、`qing` CLI、按实例的模型路由、Claude Code 启动器和 `qing config import-claude` 配置导入（含本地私密凭证存储）已经实现。发布**产物**可构建、可安装（2026-10-05 已在最小 Ubuntu 24.04 容器内验证干净 Linux 安装，Docker 28.4.0），但**尚无公开注册表发布**——PyPI 名 `qingniao` 被无关项目占用，分发包名定为 `qingniao-gateway`。真实供应商证据：MiniMax M3 已完整通过导入路径验证（预检、离线导入、私密存储、网关首请求、重启持久化）；glm-5.3-flash 在验证时被**限流（429）**，其完整导入环节未能在真实请求预算内运行——该缺口如实记录、未绕过。更早的 `qing run` 真实供应商证据（2026-09-08）覆盖两个配置；本次验收中可选的真实 claude 运行因请求预算耗尽而跳过。未对任何其他供应商、端点或模型做验证。
 
 ## 换个模型，不该还要换一份配置
 
@@ -96,18 +96,18 @@ uv run qing provider list && qing model list
 先在本地构建 wheel（见 [docs/development.md](docs/development.md)，`uv build`），再用你习惯的 Python 工具安装。推荐路径使用 [uv](https://docs.astral.sh/uv/)——它管理隔离环境并把 `qing` 放进 `PATH`：
 
 ```
-uv tool install qingniao-0.1.0-py3-none-any.whl
+uv tool install qingniao_gateway-0.1.0-py3-none-any.whl
 qing --version        # 打印发布版本（0.1.0）
 ```
 
-`python3 -m venv venv && venv/bin/pip install qingniao-0.1.0-py3-none-any.whl` 也可以（`qing` 会进入 `venv/bin/`）。运行时需要 Python 3.12+ 以及已声明的依赖（typer、rich、httpx、starlette、uvicorn），安装后无需联网。
+`python3 -m venv venv && venv/bin/pip install qingniao_gateway-0.1.0-py3-none-any.whl` 也可以（`qing` 会进入 `venv/bin/`）。运行时需要 Python 3.12+ 以及已声明的依赖（typer、rich、httpx、starlette、uvicorn），安装后无需联网。
 
-**卸载与你的数据。** `uv tool uninstall qingniao`（或 `pip uninstall qingniao`）删除 CLI 与包文件，但**默认保留用户数据**——状态目录（`$XDG_STATE_HOME/qingniao`，否则 `~/.local/state/qingniao`）中的共享配置、私密凭证与脱敏请求记录不会被主动删除。如需彻底清除，请自行删除状态目录；不会隐式删除任何内容。该策略由干净安装验收强制执行。
+**卸载与你的数据。** `uv tool uninstall qingniao-gateway`（或 `pip uninstall qingniao-gateway`）删除 CLI 与包文件，但**默认保留用户数据**——状态目录（`$XDG_STATE_HOME/qingniao`，否则 `~/.local/state/qingniao`）中的共享配置、私密凭证与脱敏请求记录不会被主动删除。如需彻底清除，请自行删除状态目录；不会隐式删除任何内容。该策略由干净安装验收强制执行。
 
 ## 验证声明（2026-10-05）
 
 - **真实导入路径验证**（`experiments/real-provider-verification/run_import_validation.py`）：真实请求预算上限 10（实际使用正好 10，均先计数后发起）。MiniMax M3（`MiniMax-M3` @ `https://api.minimaxi.com/anthropic`，`Authorization: Bearer`）通过完整导入路径：预检 200 且模型串精确回显、离线 `config import-claude` 预览零写入、`--apply` 凭证入私密存储（配置中无密钥）、网关首请求上游模型串正确且用量如实记录、重启后私密凭证仍可用。glm-5.3-flash（`https://open.bigmodel.cn/api/anthropic`）在两次预检中均返回 **429 rate_limit_error**，其导入环节未运行——该供应商侧阻塞被如实记录为缺口，未做替代或绕过。可选的真实 `claude` `qing run` 环节因预算耗尽而跳过。
-- **干净 Linux 安装**（`experiments/clean-install-verification/`）：在最小 Ubuntu 24.04.3 容器（Docker 28.4.0，无源码检出）中，wheel 经 `uv tool install` 安装，`qing --version` 输出 `0.1.0`，网关完成一个本地合成首请求（上游观察到正确模型串），`uv tool uninstall qingniao` 后 CLI 消失而状态目录保留。
+- **干净 Linux 安装**（`experiments/clean-install-verification/`）：在最小 Ubuntu 24.04.3 容器（Docker 28.4.0，无源码检出）中，wheel 经 `uv tool install` 安装，`qing --version` 输出 `0.1.0`，网关完成一个本地合成首请求（上游观察到正确模型串），`uv tool uninstall qingniao-gateway` 后 CLI 消失而状态目录保留。
 - 更早的真实供应商证据（2026-09-08，`qing run` 覆盖两个配置）记录在 [docs/development.md](docs/development.md)。
 
 这些已测配置不代表广泛供应商兼容性；没有任何真实供应商经由公开发布的安装（尚不存在）被访问。

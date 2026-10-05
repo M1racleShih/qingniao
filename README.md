@@ -60,10 +60,9 @@ Two paths exist. The **install path** starts from a locally built release
 artifact (`.whl`) — see [Install from a release artifact](#install-from-a-release-artifact)
 below. The **development path** runs straight from this repository with
 `uv` (see [docs/development.md](docs/development.md)). The intended CLI
-command is `qing`; the public distribution package name is still being
-selected (`qingniao` on PyPI is an unrelated project) — until the
-maintainer picks the name, only locally built artifacts are installed and
-no public publish step is performed.
+command is `qing`; the distribution package name is `qingniao-gateway`
+(`qingniao` on PyPI is an unrelated project). So far only locally built
+artifacts are installed; no public publish step has been performed.
 
 **Development path (from this repository):**
 
@@ -106,23 +105,24 @@ primary documented path uses [uv](https://docs.astral.sh/uv/), which
 manages an isolated environment and puts `qing` on your `PATH`:
 
 ```
-uv tool install qingniao-0.1.0-py3-none-any.whl
+uv tool install qingniao_gateway-0.1.0-py3-none-any.whl
 qing --version        # prints the release version (0.1.0)
 ```
 
 An equivalent `python3 -m venv venv && venv/bin/pip install
-qingniao-0.1.0-py3-none-any.whl` also works (the `qing` script lands in
-`venv/bin/`). The runtime needs Python 3.12+ and only the declared
-dependencies (typer, rich, httpx, starlette, uvicorn) — no network is
-needed after installation.
+qingniao_gateway-0.1.0-py3-none-any.whl` also works (the `qing` script
+lands in `venv/bin/`). The runtime needs Python 3.12+ and only the
+declared dependencies (typer, rich, httpx, starlette, uvicorn) — no
+network is needed after installation.
 
-**Uninstall and your data.** `uv tool uninstall qingniao` (or `pip
-uninstall qingniao`) removes the CLI and the package files but **keeps
-your user data** — the state directory (`$XDG_STATE_HOME/qingniao`, else
-`~/.local/state/qingniao`) with the shared configuration, private
-credentials and sanitized request records is preserved by default. To
-remove it too, delete the state directory yourself; nothing is removed
-implicitly. This policy is enforced by the clean-install acceptance.
+**Uninstall and your data.** `uv tool uninstall qingniao-gateway` (or `pip
+uninstall qingniao-gateway`) removes the CLI and the package files but
+**keeps your user data** — the state directory
+(`$XDG_STATE_HOME/qingniao`, else `~/.local/state/qingniao`) with the
+shared configuration, private credentials and sanitized request records
+is preserved by default. To remove it too, delete the state directory
+yourself; nothing is removed implicitly. This policy is enforced by the
+clean-install acceptance.
 
 ## Verification (2026-10-05)
 
@@ -144,8 +144,8 @@ implicitly. This policy is enforced by the clean-install acceptance.
   minimal Ubuntu 24.04.3 container (Docker 28.4.0, no source checkout), the
   wheel installed via `uv tool install`, `qing --version` printed `0.1.0`,
   the gateway served a local synthetic first request (upstream observed the
-  correct model string), and after `uv tool uninstall qingniao` the CLI was
-  gone while the state directory was preserved.
+  correct model string), and after `uv tool uninstall qingniao-gateway`
+  the CLI was gone while the state directory was preserved.
 - Earlier real-provider evidence (2026-09-08, `qing run` on both
   configurations) is recorded in [docs/development.md](docs/development.md).
 

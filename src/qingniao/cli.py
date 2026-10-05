@@ -31,7 +31,7 @@ def _qing_version() -> str:
     try:
         from importlib.metadata import version as _metadata_version
 
-        return _metadata_version("qingniao")
+        return _metadata_version("qingniao-gateway")
     except Exception:
         from . import __version__ as _version
 

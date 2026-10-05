@@ -14,8 +14,8 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}" \
     QING_DOCKER_TOKEN=docker-fixture-token
 # Install from the release artifact exactly as the public docs describe.
-COPY qingniao.whl /tmp/qingniao-0.1.0-py3-none-any.whl
-RUN uv tool install /tmp/qingniao-0.1.0-py3-none-any.whl
+COPY qingniao.whl /tmp/qingniao_gateway-0.1.0-py3-none-any.whl
+RUN uv tool install /tmp/qingniao_gateway-0.1.0-py3-none-any.whl
 RUN qing --version
 COPY install_check.py /tmp/install_check.py
-CMD ["/root/.local/share/uv/tools/qingniao/bin/python", "/tmp/install_check.py"]
+CMD ["/root/.local/share/uv/tools/qingniao-gateway/bin/python", "/tmp/install_check.py"]

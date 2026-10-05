@@ -508,7 +508,7 @@ wheels = [
 ]
 
 [[package]]
-name = "qingniao"
+name = "qingniao-gateway"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
