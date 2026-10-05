@@ -19,8 +19,11 @@ schema in format version 1:
 - `credentials` (optional, additive) names catalog credential entries:
   `{"source": "env", "env": NAME}` reads the credential from the gateway
   process environment variable `NAME`; `{"source": "private"}` refers to
-  an immutable private store version. An absent section behaves as empty,
-  and a provider may reference a catalog id or a direct `cred_<hex>` id.
+  an immutable private store version. An absent section behaves as empty
+  and is not serialized; a present section requires this build (older
+  builds reject unknown top-level fields, so remove it or restore the
+  pre-upgrade backup before rolling back). A provider may reference a
+  catalog id or a direct `cred_<hex>` id.
 - `models` map a catalog model ID to a provider and the exact upstream model
   string sent to that provider.
 - `defaults` name the default main and auxiliary request models and the

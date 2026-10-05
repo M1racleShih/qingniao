@@ -48,7 +48,7 @@ Every **gateway-generated** error is JSON with a stable `code`:
 | `entry_exists` | CLI 1 | an add targets a catalog id that already exists (no write) |
 | `entry_not_found` | CLI 1 | a set/show/rm targets a catalog id that does not exist (no write) |
 | `entry_in_use` | CLI 1 | a delete would break a reference; `references` lists every reference (no write) |
-| `invalid_argument` | CLI 1 | a catalog command received an invalid value (bad auth mode, malformed URL, invalid env name, conflicting sources); `errors[]` lists field problems |
+| `invalid_argument` | CLI 2 | an entry-level command received invalid arguments (bad auth mode, malformed URL, invalid env name, conflicting or missing credential sources, nothing to change); `errors[]` lists field problems |
 | `cli_error` | CLI 1/2 | generic CLI or usage failure |
 | `credential_missing` | 500 | credential source absent at request time — env var unset, private version not present (no upstream call) |
 | `credential_invalid` / `credential_unreadable` | 500 | private credential store refused the access (malformed id, unsafe permissions, symlink, foreign owner, non-regular file); sanitized category only |
@@ -102,9 +102,16 @@ A provider may reference either an env-type catalog id (the gateway
 resolves the environment variable at request time) or a direct
 `cred_<hex>` id; `credential_id` values that are neither in the catalog
 nor valid private ids are rejected. An absent `credentials` section is
-valid and behaves as empty. Unknown future `schema_version` values are
-rejected — never migrated or overwritten. The first write that upgrades a
-legacy file snapshots the old bytes as
+valid and behaves as empty, and the section is written to disk **only
+when it is non-empty** — a configuration without catalog credentials
+never carries the key, so it stays readable by builds that predate this
+feature. Configuration files that do carry the `credentials` section
+require this build: older builds reject them as an unknown top-level
+field (`credentials` in the `unknown top-level fields` error), so before
+rolling back to an older program either remove the section from the
+configuration or restore the pre-upgrade backup. Unknown future
+`schema_version` values are rejected — never migrated or overwritten.
+The first write that upgrades a legacy file snapshots the old bytes as
 `config.backup.pre-v1.json`; to roll back, stop the gateway, restore
 that backup and use the older program (imported private connections do
 not carry back and their files are not auto-deleted).
@@ -302,10 +309,16 @@ designed for humans and agents alike:
   redirected, and values are soft-wrapped but never truncated at widths
   40/80/120.
 - **Exit codes.** 0 on success, 1 for expected failures (stable machine
-  code in the error payload), 2 for usage errors. Machine-distinguishable
-  codes include `entry_exists`, `entry_not_found`, `entry_in_use`,
-  `generation_conflict` and `invalid_argument` (see the error table
-  above).
+  code in the error payload), 2 for usage errors. Usage errors in the
+  entry-level commands (invalid values, mutually exclusive or missing
+  credential sources, nothing-to-change sets) exit 2 in **both** human
+  and `--json` mode, and in `--json` mode carry the stable
+  `invalid_argument` code with an `errors[]` detail (field paths and
+  messages); parser-level missing required options also exit 2 with the
+  generic `cli_error` code. Expected failures exit 1 with their own
+  code: `entry_exists`, `entry_not_found`, `entry_in_use`,
+  `generation_conflict`, `gateway_unreachable`, ... (see the error
+  table above).
 - **Read-modify-write with generation checks.** Every mutating command
   reads the current configuration, changes exactly one entry and
   commits a conditional `PUT /config?expected_generation=N`. A

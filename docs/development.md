@@ -134,8 +134,14 @@ version; that follows the existing recovery/version rules).
 The optional `credentials` top-level configuration section stores the
 catalog (`{"source": "env", "env": NAME}` or `{"source": "private"}`
 entries); it is additive to format version 1, absent sections behave as
-empty, and providers may reference a catalog id (resolved by the
-gateway at request time) or a direct `cred_<hex>` private id.
+empty and are **not serialized** (a configuration without catalog
+credentials never carries the key), and providers may reference a
+catalog id (resolved by the gateway at request time) or a direct
+`cred_<hex>` private id. Compatibility boundary: configurations that
+**do** carry the `credentials` section require this build — older
+builds reject them as an unknown top-level field. Before rolling back to
+an older program, remove the section from the configuration or restore
+the pre-upgrade backup (`config.backup.pre-v1.json`).
 
 ## Project layout
 
