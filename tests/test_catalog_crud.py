@@ -68,8 +68,17 @@ def test_empty_credentials_section_is_optional_and_defaults_empty():
     config = _config()
     parsed = validate_config(config)
     assert parsed.credentials == {}
-    assert "credentials" in parsed.to_json()
-    assert parsed.to_json()["credentials"] == {}
+    # an empty catalog is serialized without the credentials key so configs
+    # without catalog credentials stay readable by older builds
+    assert "credentials" not in parsed.to_json()
+
+def test_credentials_section_serialized_only_when_non_empty():
+    config = _config(credentials={"k": {"source": "env", "env": "X"}})
+    parsed = validate_config(config)
+    assert parsed.to_json()["credentials"] == {"k": {"source": "env", "env": "X"}}
+    # removing the last entry drops the section again on write
+    empty = _config()
+    assert "credentials" not in validate_config(empty).to_json()
 
 
 def test_legacy_credential_id_without_section_entry_still_valid():

@@ -217,10 +217,25 @@ def test_error_codes_machine_distinguishable(live_gateway):
     assert _code(["credential", "add", "dup-key", "--env", "QING_CAT_P", *_base(state_dir)]) == "entry_exists"
     # unknown card catalog id on provider add
     assert _code(["provider", "add", "prov-x", "--base-url", "https://x", "--auth", "bearer", "--credential-id", "ghost", *_base(state_dir)]) == "entry_not_found"
-    # invalid argument: unknown auth mode
-    assert _code(["provider", "add", "prov-x", "--base-url", "https://x", "--auth", "nope", "--credential-env", "E", *_base(state_dir)]) == "invalid_argument"
+    # invalid argument: unknown auth mode and malformed URL are usage errors
+    # (exit 2) with the invalid_argument code in both modes
+    def _usage_code(args):
+        result = _run_cli(args, env)
+        assert result.returncode == 2
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "invalid_argument"
+        assert payload["error"]["message"]
+        return payload["error"]
+
+    err = _usage_code(["provider", "add", "prov-x", "--base-url", "https://x", "--auth", "nope", "--credential-env", "E", *_base(state_dir)])
+    assert any(e["path"] == "--auth" for e in err.get("errors", []))
     # invalid argument: bad base url is caught by the gateway schema rules locally
-    assert _code(["provider", "set", "prov-a", "--base-url", "ftp://nope", *_base(state_dir)]) == "invalid_argument"
+    err = _usage_code(["provider", "set", "prov-a", "--base-url", "ftp://nope", *_base(state_dir)])
+    assert err.get("errors")
+    # mutually exclusive credential sources stay usage errors in json mode
+    err = _usage_code(["provider", "set", "prov-a", "--base-url", "https://x", "--credential-env", "E", "--credential-id", "c", *_base(state_dir)])
+    assert any("--credential-env" in e["path"] for e in err.get("errors", []))
 
 
 def test_dry_run_writes_nothing(live_gateway):
@@ -262,10 +277,12 @@ def test_usage_and_exit_codes_for_missing_and_conflicting(live_gateway):
     missing = _run_cli(["provider", "add", "p", "--auth", "bearer", "--credential-env", "E", "--state-dir", st], env)
     assert missing.returncode == 2
     assert "--base-url" in missing.stderr
+    # parser-level missing option stays a click usage error (exit 2, cli_error)
     missing_json = _run_cli(["provider", "add", "p", "--auth", "bearer", "--credential-env", "E", "--json", "--state-dir", st], env)
     assert missing_json.returncode == 2
     assert json.loads(missing_json.stdout)["error"]["code"] == "cli_error"
 
+    # function-level usage errors exit 2 in json mode with invalid_argument
     both = _run_cli(
         ["provider", "add", "p", "--base-url", "https://x", "--auth", "bearer", "--credential-env", "E", "--credential-id", "c", "--state-dir", st],
         env,
@@ -275,12 +292,19 @@ def test_usage_and_exit_codes_for_missing_and_conflicting(live_gateway):
         ["provider", "add", "p", "--base-url", "https://x", "--auth", "bearer", "--credential-env", "E", "--credential-id", "c", "--json", "--state-dir", st],
         env,
     )
-    assert both_json.returncode == 1
-    assert json.loads(both_json.stdout)["error"]["code"] == "cli_error"
+    assert both_json.returncode == 2
+    both_error = json.loads(both_json.stdout)["error"]
+    assert both_error["code"] == "invalid_argument"
+    assert both_error["errors"]
 
     nosource = _run_cli(["credential", "add", "k", "--state-dir", st], env)
     assert nosource.returncode == 2
     assert "source" in nosource.stderr
+    nosource_json = _run_cli(["credential", "add", "k", "--json", "--state-dir", st], env)
+    assert nosource_json.returncode == 2
+    nosource_error = json.loads(nosource_json.stdout)["error"]
+    assert nosource_error["code"] == "invalid_argument"
+    assert any("source" in e["path"] for e in nosource_error.get("errors", []))
 
 
 def test_set_noop_is_reported_without_writing(live_gateway):
