@@ -302,8 +302,10 @@ def _commit_import(*, state_dir: Path, plan: ImportPlan, raw_source: bytes | Non
             data["providers"][plan.provider_id] = provider
         elif credential_id is not None:
             # A credential-only commit registers the new immutable version
-            # in the credential catalog in the same single transaction.
-            data["credentials"][credential_id] = {"source": "private"}
+            # in the credential catalog in the same single transaction. The
+            # section may be absent on disk (empty catalog), so it is
+            # created here only when it will carry an entry.
+            data.setdefault("credentials", {})[credential_id] = {"source": "private"}
         for model in plan.models:
             data["models"][model.model_id] = {
                 "provider": plan.provider_id,

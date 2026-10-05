@@ -99,7 +99,7 @@ class SharedConfig:
     last_operation: str | None = None
 
     def to_json(self) -> dict:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "generation": self.generation,
             "last_operation": self.last_operation,
@@ -119,15 +119,21 @@ class SharedConfig:
                 mid: {"provider": m.provider, "upstream_model": m.upstream_model}
                 for mid, m in self.models.items()
             },
-            "credentials": {
-                cid: c.to_json() for cid, c in self.credentials.items()
-            },
             "defaults": {
                 "model": self.defaults.model,
                 "aux_model": self.defaults.aux_model,
                 "routes": dict(self.defaults.routes),
             },
         }
+        # The credentials section is written only when it has entries, so a
+        # configuration without catalog credentials stays readable by older
+        # builds (which reject unknown top-level fields). An absent section
+        # reads back as empty on every build.
+        if self.credentials:
+            payload["credentials"] = {
+                cid: c.to_json() for cid, c in self.credentials.items()
+            }
+        return payload
 
 
 EMPTY_CONFIG = SharedConfig(
