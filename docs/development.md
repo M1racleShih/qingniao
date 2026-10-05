@@ -21,7 +21,42 @@ uv run python -m qingniao --help
 
 The lockfile (`uv.lock`) pins exact dependency versions resolved with uv.
 There is no published-package claim: installation happens from this
-repository only.
+repository (or from locally built artifacts — see below).
+
+## Building and installing release artifacts
+
+End users follow the README's [install-from-artifact path](../README.md#install-from-a-release-artifact);
+this page is the developer path. To produce the release artifacts from a
+clean checkout:
+
+```
+uv build            # produces dist/qingniao-<version>.tar.gz and .whl
+```
+
+Version consistency is enforced: `qing --version` (new in this release)
+reports the package version through installed metadata, falling back to
+`qingniao.__version__`; the wheel/sdist version, the package metadata and
+`qing --version` must all agree (locked by `tests/test_cli.py::test_version_consistent_with_package_metadata`).
+
+The sdist contains only public code and documentation; tests, experiments
+and every personal path (agent skills, the private spec workflow) are
+excluded by the packaging config in `pyproject.toml`. A content audit is
+part of the release acceptance (see `experiments/clean-install-verification/`
+and the verification sections in the README).
+
+A clean Linux install from the wheel (no source checkout) was verified on
+2026-10-05 in a minimal Ubuntu 24.04.3 container: `uv tool install` of the
+wheel, `qing --version` matching the release version, one local synthetic
+first request through `qing serve`, and `uv tool uninstall qingniao`
+removing the CLI while the state directory is preserved. The reproduction
+lives in `experiments/clean-install-verification/`.
+
+Real import-path validation uses `experiments/real-provider-verification/run_import_validation.py`
+(the same sanitization/budget guardrails as `run_validation.py`: exit 77
+without credentials, a real-request cap with counting before every request,
+no cross-provider retries, sanitized reports off-tree). See the README's
+verification section for the 2026-10-05 result: MiniMax M3 passed the full
+import path; zai-rate limiting blocked glm-5.3-flash within the budget.
 
 ## Running the gateway locally
 
@@ -168,8 +203,13 @@ the pre-upgrade backup (`config.backup.pre-v1.json`).
 - `src/qingniao/proxy_api.py` — `/v1/messages` forwarding to upstreams
 - `src/qingniao/app.py`, `src/qingniao/serve.py` — ASGI assembly and
   foreground server (startup recovery before accepting anything)
-- `src/qingniao/cli.py` — `qing` command line interface
+- `src/qingniao/cli.py` — `qing` command line interface (including `--version`)
 - `tests/` — unit, ASGI-level, real-TCP and CLI-subprocess end-to-end tests
+- `experiments/real-provider-verification/` — real-provider validation
+  harnesses (`run_validation.py`, `run_import_validation.py`) with the
+  sanitization/budget guardrails
+- `experiments/clean-install-verification/` — Docker clean-install
+  acceptance (Dockerfile + in-container checker + reproduction notes)
 
 ## Test suite
 
@@ -260,10 +300,23 @@ Reproduce with both credentials exported in the gateway shell: `uv run --locked 
 
 ## Current limitations
 
-- Real-provider evidence covers only the two validated configurations above; every other provider, endpoint and model is untested, and the loopback synthetic fixtures remain the regression baseline.
-- The import path is verified against synthetic local fixtures only; no
-  real provider has been reached through an import. Reverse proxy aliases
-  that loop back to the gateway cannot be detected by the offline
-  self-reference check.
-- A published installation path is not implemented (first-release item).
-- The launcher has been exercised against Claude Code 2.1.251 on Linux only.
+- Real-provider evidence covers only the validated configurations;
+  every other provider, endpoint and model is untested, and the loopback
+  synthetic fixtures remain the regression baseline.
+- As of 2026-10-05 the real import path is validated end to end for
+  MiniMax M3 only; **glm-5.3-flash answered every preflight attempt with
+  429 rate_limit_error** within the acceptance window, so its full import
+  leg and the optional real-`claude` leg did not run (the real-request
+  budget of 10 was fully and honestly consumed; everything was counted
+  before firing). That is a recorded gap that must be closed before the
+  import path can be claimed for both authorized configurations. Reverse
+  proxy aliases that loop back to the gateway cannot be detected by the
+  offline self-reference check.
+- A **public** published installation path does not exist yet: the clean
+  Linux install from a locally built artifact is verified, but the public
+  package name is still being decided (PyPI `qingniao` is occupied) and
+  publishing waits for an explicit maintainer authorization.
+- The launcher has been exercised against Claude Code 2.1.251 (2026-09-08
+  acceptance) and Claude Code 2.1.274 is present in this environment; a
+  fresh `qing run` acceptance run within this release slice was skipped
+  when the real-request budget ran out.

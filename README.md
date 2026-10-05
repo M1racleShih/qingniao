@@ -16,7 +16,7 @@
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-> **Early development — runnable core.** The gateway, the `qing` CLI, per-instance model routing, the Claude Code launcher and the `qing config import-claude` flow (settings import with a local private credential store) are implemented and reproducible from this repository with `uv` (see [Try the development slice](#can-i-try-it)). There is no published package, registry release, or clean-install path yet. Real-provider evidence covers exactly the two tested configurations noted below (MiniMax M3 and glm-5.3-flash) — no other provider, endpoint or model has been verified, and the import flow itself is verified against synthetic local fixtures only; the first-release items below (published installs) are still being built.
+> **Early development — runnable core, release path being assembled.** The gateway, the `qing` CLI, per-instance model routing, the Claude Code launcher and the `qing config import-claude` flow (settings import with a local private credential store) are implemented. The release **artifact** is buildable and installable (clean Linux install verified inside a minimal Ubuntu 24.04 container on 2026-10-05, Docker 28.4.0), but there is **no public registry release yet** — the PyPI name `qingniao` is occupied by an unrelated project, and the public package name is still being decided. Real-provider evidence: MiniMax M3 is fully validated through the import path (preflight, offline import, private store, gateway first requests, restart persistence); glm-5.3-flash was **rate-limited (429) at validation time** and its full import leg could not be run within the real-request budget — that gap is recorded, not papered over. Earlier `qing run` real-provider evidence (2026-09-08) covers both configurations; the optional fresh claude run in this acceptance was skipped when the request budget ran out. No other provider, endpoint or model has been verified.
 
 ## Your next model shouldn't need another config file
 
@@ -56,7 +56,16 @@ Qingniao's longer-term role is to offer shared credentials, routing, and request
 
 ## Can I try it?
 
-**Yes, as a development slice straight from this repository** — no published release or official installation command exists yet, and `npm install -g qing` installs an unrelated package. The intended CLI command is `qing`; the distribution package name is still being selected.
+Two paths exist. The **install path** starts from a locally built release
+artifact (`.whl`) — see [Install from a release artifact](#install-from-a-release-artifact)
+below. The **development path** runs straight from this repository with
+`uv` (see [docs/development.md](docs/development.md)). The intended CLI
+command is `qing`; the public distribution package name is still being
+selected (`qingniao` on PyPI is an unrelated project) — until the
+maintainer picks the name, only locally built artifacts are installed and
+no public publish step is performed.
+
+**Development path (from this repository):**
 
 ```
 uv sync --locked --extra dev
@@ -89,7 +98,60 @@ attaching would do without registering anything.
 
 Credentials must be exported in the gateway's shell **before** `qing serve`; exporting later in another shell does not affect a running gateway. `qing run` gives every launch (including `--resume`) a fresh instance identity, injects the transport through a temporary 0600 settings file (never in argv), preserves your Claude settings, history and tools, and reports honestly: registered vs. started vs. first gateway-observed request. See [docs/development.md](docs/development.md) and [docs/api.md](docs/api.md).
 
-Real-provider validation (2026-09-08): two concurrent same-directory Claude Code sessions were run through `qing run` against exactly two tested configurations — MiniMax M3 at `https://api.minimaxi.com/anthropic` (model `MiniMax-M3`) and glm-5.3-flash at `https://open.bigmodel.cn/api/anthropic` (model `glm-5.3-flash`), both via `Authorization: Bearer` — covering distinct identities, an in-flight route switch with applied acknowledgement, cross-model tool-result continuation (evidenced by sanitized native tool facts and the reply), a previously inherited default staying unchanged on a live instance across route and defaults updates, defaults that affect only new instances, and explicit model precedence. These two tested configurations do not imply broad provider compatibility, and no real provider was reached through any published install (none exists yet). See `experiments/real-provider-verification/` for the reproducible, sanitized validation script.
+## Install from a release artifact
+
+Build the wheel locally (see [docs/development.md](docs/development.md) —
+`uv build`), then install it with your Python tooling of choice. The
+primary documented path uses [uv](https://docs.astral.sh/uv/), which
+manages an isolated environment and puts `qing` on your `PATH`:
+
+```
+uv tool install qingniao-0.1.0-py3-none-any.whl
+qing --version        # prints the release version (0.1.0)
+```
+
+An equivalent `python3 -m venv venv && venv/bin/pip install
+qingniao-0.1.0-py3-none-any.whl` also works (the `qing` script lands in
+`venv/bin/`). The runtime needs Python 3.12+ and only the declared
+dependencies (typer, rich, httpx, starlette, uvicorn) — no network is
+needed after installation.
+
+**Uninstall and your data.** `uv tool uninstall qingniao` (or `pip
+uninstall qingniao`) removes the CLI and the package files but **keeps
+your user data** — the state directory (`$XDG_STATE_HOME/qingniao`, else
+`~/.local/state/qingniao`) with the shared configuration, private
+credentials and sanitized request records is preserved by default. To
+remove it too, delete the state directory yourself; nothing is removed
+implicitly. This policy is enforced by the clean-install acceptance.
+
+## Verification (2026-10-05)
+
+- **Real import-path validation** (`experiments/real-provider-verification/run_import_validation.py`):
+  with the real request budget capped at 10 (used: exactly 10, all counted
+  before firing), MiniMax M3 (`MiniMax-M3` at
+  `https://api.minimaxi.com/anthropic`, `Authorization: Bearer`) passed a
+  full import-path run: preflight 200 with the exact model echo, offline
+  `config import-claude` preview with zero writes, `--apply` storing the
+  credential in the private store (no key in the configuration), gateway
+  first requests with the correct upstream model string and faithfully
+  recorded usage, and a private credential usable after a gateway restart.
+  glm-5.3-flash (`https://open.bigmodel.cn/api/anthropic`) answered the
+  preflight with **429 rate_limit_error** on both attempts and its import
+  leg was not run; that provider-side block is recorded as a gap, not
+  bypassed. The optional real-`claude` `qing run` leg was skipped when the
+  budget ran out.
+- **Clean Linux install** (`experiments/clean-install-verification/`): in a
+  minimal Ubuntu 24.04.3 container (Docker 28.4.0, no source checkout), the
+  wheel installed via `uv tool install`, `qing --version` printed `0.1.0`,
+  the gateway served a local synthetic first request (upstream observed the
+  correct model string), and after `uv tool uninstall qingniao` the CLI was
+  gone while the state directory was preserved.
+- Earlier real-provider evidence (2026-09-08, `qing run` on both
+  configurations) is recorded in [docs/development.md](docs/development.md).
+
+These tested configurations do not imply broad provider compatibility.
+No real provider was reached through a publicly published install (none
+exists yet).
 
 Watch this repository for the first runnable release, or help us build it. The [roadmap](docs/roadmap.md) shows the first milestone. If switching providers keeps interrupting your work, open an issue with your agent, provider, and the step that gets in your way. Please leave out credentials and private prompts.
 
