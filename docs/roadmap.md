@@ -22,7 +22,7 @@ Python is the selected primary language for the first gateway and `qing` CLI. Sp
 - Request history in the terminal showing destination, outcome, timing, and provider-reported usage. Incomplete usage is marked unknown.
 - A usable `qing` command and a locally verified install path (build, clean Linux install, uninstall-with-data-preservation) are done; a **public** published installation path is still pending the public package-name decision and an explicit release authorization.
 
-Remaining before we can call the first release ready: nothing provider-side blocks the two authorized configurations (both passed the full import path in this slice). Optional follow-ups: exercise the MiMo fallback leg (XIAOMI credentials) as a third upstream if the maintainer wants it in the acceptance, and perform the actual publish step (PyPI upload, GitHub Release, tag push), which still waits for an explicit maintainer authorization.
+The first release meets the maintainer's readiness gate: both authorized upstreams are fully validated through the import path and nothing provider-side blocks them. Optional follow-ups: exercise the MiMo fallback leg (XIAOMI credentials) as a third upstream if the maintainer wants it in the acceptance, and perform the actual publish step (PyPI upload, GitHub Release, tag push), which still waits for an explicit maintainer authorization.
 
 The release is ready only when this workflow is demonstrated against the documented client and provider versions. A mocked response alone does not establish provider compatibility.
 
