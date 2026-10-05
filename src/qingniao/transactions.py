@@ -292,10 +292,18 @@ def _commit_import(*, state_dir: Path, plan: ImportPlan, raw_source: bytes | Non
         # Upgrade the payload's generation for validation; apply()
         # re-verifies against the on-disk file under the same lock.
         data["generation"] = plan.expected_generation + 1
-        provider: dict = {"base_url": plan.base_url, "auth": plan.auth}
-        if credential_id is not None:
-            provider["credential_id"] = credential_id
-        data["providers"][plan.provider_id] = provider
+        if plan.provider_id:
+            # Credential-only plans (``qing credential add --from-stdin``)
+            # leave the provider catalog untouched here; the private version
+            # is staged and committed below and referenced later by id.
+            provider: dict = {"base_url": plan.base_url, "auth": plan.auth}
+            if credential_id is not None:
+                provider["credential_id"] = credential_id
+            data["providers"][plan.provider_id] = provider
+        elif credential_id is not None:
+            # A credential-only commit registers the new immutable version
+            # in the credential catalog in the same single transaction.
+            data["credentials"][credential_id] = {"source": "private"}
         for model in plan.models:
             data["models"][model.model_id] = {
                 "provider": plan.provider_id,

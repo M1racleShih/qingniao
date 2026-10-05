@@ -220,6 +220,21 @@ class Gateway:
                 result["applied"] = True
             return result
 
+    def _provider_credential(self, provider) -> CredentialRef:
+        """Resolve a provider's credential reference through the catalog.
+
+        ``credential_id`` normally names an immutable private store version;
+        when the same id is a catalog entry of source ``env``, the real
+        credential is read from the gateway process environment variable
+        named by the catalog entry.
+        """
+        if provider.credential_id is not None:
+            catalog = self.config.credentials.get(provider.credential_id)
+            if catalog is not None and catalog.source == "env":
+                return CredentialRef(kind="env", name=catalog.env or "")
+            return CredentialRef(kind="private", name=provider.credential_id)
+        return CredentialRef(kind="env", name=provider.credential_env or "")
+
     def resolve_snapshot(self, request_model: str, catalog_model: str, route_revision: int) -> RouteSnapshot:
         entry = self.config.models.get(catalog_model)
         if entry is None:
@@ -229,10 +244,7 @@ class Gateway:
                 f"unknown destination {catalog_model!r}",
             )
         provider = self.config.providers[entry.provider]
-        if provider.credential_id is not None:
-            credential = CredentialRef(kind="private", name=provider.credential_id)
-        else:
-            credential = CredentialRef(kind="env", name=provider.credential_env or "")
+        credential = self._provider_credential(provider)
         return RouteSnapshot(
             request_model=request_model,
             catalog_model=catalog_model,
@@ -370,10 +382,7 @@ class Gateway:
         provider = self.config.providers.get(entry.provider)
         if provider is None:
             return False
-        if provider.credential_id is not None:
-            credential = CredentialRef(kind="private", name=provider.credential_id)
-        else:
-            credential = CredentialRef(kind="env", name=provider.credential_env or "")
+        credential = self._provider_credential(provider)
         return (
             snap.provider_id == entry.provider
             and snap.base_url == provider.base_url

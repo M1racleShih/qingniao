@@ -24,7 +24,7 @@ import json
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
@@ -36,12 +36,35 @@ SCHEMA_VERSION = 1
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 _AUTH_MODES = ("bearer", "x-api-key")
+_CREDENTIAL_SOURCES = ("env", "private")
 _TOP_LEVEL_KEYS = {"providers", "models", "defaults"}
-_TOP_LEVEL_KEYS_V1 = {"schema_version", "generation", "last_operation", "providers", "models", "defaults"}
+_TOP_LEVEL_KEYS_V1 = {"schema_version", "generation", "last_operation", "providers", "models", "defaults", "credentials"}
 _PROVIDER_KEYS = {"base_url", "credential_env", "auth"}
 _PROVIDER_KEYS_V1 = {"base_url", "credential_env", "credential_id", "auth"}
 _MODEL_KEYS = {"provider", "upstream_model"}
 _DEFAULTS_KEYS = {"model", "aux_model", "routes"}
+_CREDENTIAL_KEYS = {"source", "env"}
+
+
+@dataclass(frozen=True)
+class CredentialEntry:
+    """A catalog entry for a named credential source.
+
+    ``source`` is ``"env"`` (the credential is read from an environment
+    variable named ``env`` in the gateway process) or ``"private"`` (the
+    credential is an immutable version in the private store; the secret
+    never appears in the configuration). Providers reference a catalog
+    entry through ``credential_id``; the gateway resolves the entry at
+    request time.
+    """
+
+    source: str
+    env: str | None = None
+
+    def to_json(self) -> dict:
+        if self.source == "private":
+            return {"source": "private"}
+        return {"source": "env", "env": self.env}
 
 
 @dataclass(frozen=True)
@@ -70,6 +93,7 @@ class SharedConfig:
     providers: Mapping[str, Provider]
     models: Mapping[str, ModelEntry]
     defaults: Defaults
+    credentials: Mapping[str, CredentialEntry] = field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
     generation: int = 0
     last_operation: str | None = None
@@ -95,6 +119,9 @@ class SharedConfig:
                 mid: {"provider": m.provider, "upstream_model": m.upstream_model}
                 for mid, m in self.models.items()
             },
+            "credentials": {
+                cid: c.to_json() for cid, c in self.credentials.items()
+            },
             "defaults": {
                 "model": self.defaults.model,
                 "aux_model": self.defaults.aux_model,
@@ -107,6 +134,7 @@ EMPTY_CONFIG = SharedConfig(
     providers={},
     models={},
     defaults=Defaults(model=None, aux_model=None, routes={}),
+    credentials={},
 )
 
 
@@ -127,7 +155,7 @@ class ConfigValidationError(Exception):
 
 
 def _validate_provider(
-    pid: str, value: object, problems: list[tuple[str, str]], *, versioned: bool
+    pid: str, value: object, problems: list[tuple[str, str]], *, versioned: bool, credential_ids: set[str]
 ) -> Provider | None:
     path = f"providers.{pid}"
     if not isinstance(pid, str) or not pid.strip():
@@ -183,10 +211,8 @@ def _validate_provider(
         problems.append((f"{path}.credential_env", "must be an environment variable name"))
         return None
     credential_id = value.get("credential_id")
-    if credential_id is not None and (
-        not isinstance(credential_id, str) or not CREDENTIAL_ID_RE.match(credential_id)
-    ):
-        problems.append((f"{path}.credential_id", "must be a private credential id (cred_<hex>)"))
+    if credential_id is not None and not _valid_provider_credential_id(credential_id, credential_ids):
+        problems.append((f"{path}.credential_id", "must reference a credential catalog id or a private credential id (cred_<hex>)"))
         return None
     auth = value["auth"]
     if auth not in _AUTH_MODES:
@@ -198,6 +224,56 @@ def _validate_provider(
         auth=auth,
         credential_id=credential_id,
     )
+
+
+def _valid_provider_credential_id(credential_id: object, credential_ids: set[str]) -> bool:
+    """A provider may reference any id in the credential catalog plus legacy
+    private store ids directly (immutable versions created by imports)."""
+    if not isinstance(credential_id, str):
+        return False
+    return credential_id in credential_ids or bool(CREDENTIAL_ID_RE.match(credential_id))
+
+
+def _validate_credentials(data: dict, problems: list[tuple[str, str]]) -> dict[str, CredentialEntry]:
+    raw_credentials = data.get("credentials", {})
+    if not isinstance(raw_credentials, dict):
+        problems.append(("credentials", "must be an object"))
+        return {}
+    credentials: dict[str, CredentialEntry] = {}
+    for cid, value in raw_credentials.items():
+        path = f"credentials.{cid}"
+        if not isinstance(cid, str) or not cid.strip():
+            problems.append(("credentials", "credential ids must be non-empty strings"))
+            continue
+        if not isinstance(value, dict):
+            problems.append((path, "must be an object"))
+            continue
+        unknown = set(value) - _CREDENTIAL_KEYS
+        if unknown:
+            problems.append((path, f"unknown fields: {', '.join(sorted(unknown))}"))
+            continue
+        source = value.get("source")
+        if source not in _CREDENTIAL_SOURCES:
+            problems.append((path, f"source must be one of: {', '.join(_CREDENTIAL_SOURCES)}"))
+            continue
+        env = value.get("env")
+        if source == "env":
+            if CREDENTIAL_ID_RE.match(cid):
+                problems.append((path, "cred_<hex> ids are reserved for private-source credentials"))
+                continue
+            if env is None or not isinstance(env, str) or not _ENV_NAME_RE.match(env):
+                problems.append((f"{path}.env", "must be an environment variable name"))
+                continue
+            credentials[cid] = CredentialEntry(source="env", env=env)
+        else:
+            if not CREDENTIAL_ID_RE.match(cid):
+                problems.append((path, "private credential ids must be of the form cred_<hex>"))
+                continue
+            if env is not None:
+                problems.append((path, "private credentials carry no env field"))
+                continue
+            credentials[cid] = CredentialEntry(source="private")
+    return credentials
 
 
 def validate_config(data: object) -> SharedConfig:
@@ -240,12 +316,13 @@ def validate_config(data: object) -> SharedConfig:
                 last_operation = raw_operation
 
     providers: dict[str, Provider] = {}
+    credentials = _validate_credentials(data, problems)
     raw_providers = data.get("providers", {})
     if not isinstance(raw_providers, dict):
         problems.append(("providers", "must be an object"))
     else:
         for pid, value in raw_providers.items():
-            provider = _validate_provider(pid, value, problems, versioned=versioned)
+            provider = _validate_provider(pid, value, problems, versioned=versioned, credential_ids=set(credentials))
             if provider is not None:
                 providers[pid] = provider
 
@@ -326,6 +403,7 @@ def validate_config(data: object) -> SharedConfig:
         providers=providers,
         models=models,
         defaults=Defaults(model=defaults_model, aux_model=defaults_aux, routes=routes),
+        credentials=credentials,
         schema_version=SCHEMA_VERSION,
         generation=generation,
         last_operation=last_operation,
